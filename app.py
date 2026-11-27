@@ -10,7 +10,7 @@ FAVORITES_FILE = BASE_DIR / "favorites.json"
 HISTORY_FILE = BASE_DIR / "history.json"
 MAX_HISTORY_ITEMS = 24
 SEARCH_LIMIT = 12
-FALLBACK_THUMBNAIL = "https://via.placeholder.com/600x600/181818/1DB954?text=No+Cover+Art"
+FALLBACK_THUMBNAIL = "https://via.placeholder.com/600x600/121212/1DB954?text=No+Cover+Art"
 
 st.set_page_config(
     page_title="Spotify Streamer",
@@ -21,62 +21,79 @@ st.set_page_config(
 
 SPOTIFY_CSS = """
 <style>
-    .stApp {
-        background: linear-gradient(180deg, #191414 0%, #121212 38%, #0b0b0b 100%);
-        color: #ffffff;
+    .stApp, [data-testid="stAppViewContainer"], [data-testid="stHeader"] {
+        background-color: #000000 !important;
+        color: #ffffff !important;
     }
     section[data-testid="stSidebar"] {
-        background-color: #000000;
-        border-right: 1px solid #242424;
+        background-color: #090909 !important;
+        border-right: 1px solid #262626 !important;
+    }
+    section[data-testid="stSidebar"] * {
+        color: #ffffff !important;
     }
     .block-container {
-        padding-top: 1.5rem;
+        padding-top: 1.4rem;
         padding-bottom: 3rem;
     }
+    h1, h2, h3, h4, p, label, span, div, .stMarkdown {
+        color: #ffffff !important;
+    }
+    [data-testid="stCaptionContainer"], .stCaption {
+        color: #d4d4d8 !important;
+    }
+    input[type="text"] {
+        background-color: #18181b !important;
+        color: #ffffff !important;
+        border: 1px solid #3f3f46 !important;
+        border-radius: 999px !important;
+    }
+    input[type="text"]::placeholder {
+        color: #a1a1aa !important;
+    }
     .song-card {
-        background-color: #181818;
-        border: 1px solid #282828;
+        background-color: #111111;
+        border: 1px solid #27272a;
         border-radius: 12px;
         padding: 12px;
         margin-bottom: 14px;
-        transition: background-color 0.2s ease;
-    }
-    .song-card:hover {
-        background-color: #242424;
     }
     .song-title {
         font-weight: 700;
         font-size: 0.98rem;
-        color: #ffffff;
+        color: #ffffff !important;
         margin-top: 8px;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
     }
     .song-artist {
-        font-size: 0.84rem;
-        color: #b3b3b3;
+        font-size: 0.85rem;
+        color: #d4d4d8 !important;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
         margin-bottom: 8px;
     }
     .now-playing-box {
-        background: rgba(24, 24, 24, 0.92);
-        border: 1px solid #282828;
+        background-color: #111111;
+        border: 1px solid #27272a;
         border-radius: 16px;
         padding: 24px;
         max-width: 560px;
         margin: 0 auto 20px auto;
         text-align: center;
     }
-    .muted-caption {
-        color: #b3b3b3;
-        font-size: 0.88rem;
+    div.stButton > button, div.stFormSubmitButton > button {
+        background-color: #1db954 !important;
+        color: #000000 !important;
+        border: none !important;
+        border-radius: 999px !important;
+        font-weight: 700 !important;
     }
-    div.stButton > button {
-        border-radius: 999px;
-        font-weight: 600;
+    div.stButton > button:hover, div.stFormSubmitButton > button:hover {
+        background-color: #1ed760 !important;
+        color: #000000 !important;
     }
 </style>
 """
@@ -211,6 +228,8 @@ def resolve_stream_url(webpage_url: str) -> Optional[str]:
 def init_state() -> None:
     if "page" not in st.session_state:
         st.session_state.page = "Home"
+    if "show_favorites" not in st.session_state:
+        st.session_state.show_favorites = False
     if "favorites" not in st.session_state:
         st.session_state.favorites = load_json_list(FAVORITES_FILE)
     if "history" not in st.session_state:
@@ -287,6 +306,7 @@ def open_song_page(track: Dict[str, Any], autoplay: bool = True) -> None:
     st.session_state.queue = build_queue(clean)
     st.session_state.seek_position = 0
     st.session_state.is_playing = autoplay
+    st.session_state.show_favorites = False
     st.session_state.page = "Song Page"
     record_history(clean)
     st.rerun()
@@ -340,34 +360,86 @@ def render_track_grid(tracks: List[Dict[str, Any]], key_prefix: str) -> None:
             st.markdown("</div>", unsafe_allow_html=True)
 
 
+def run_search_from_top(query: str) -> None:
+    clean_query = query.strip()
+    if not clean_query:
+        return
+    st.session_state.last_query = clean_query
+    st.session_state.show_favorites = False
+    with st.spinner("Searching tracks..."):
+        try:
+            st.session_state.search_results = search_tracks(clean_query, limit=SEARCH_LIMIT)
+        except Exception as exc:
+            st.error(f"Search failed: {exc}")
+            st.session_state.search_results = []
+    st.session_state.page = "Search"
+    st.rerun()
+
+
+def render_top_bar() -> None:
+    col_search, col_fav_btn = st.columns([5, 1.4])
+    with col_search:
+        with st.form("top_home_search_form", clear_on_submit=False):
+            c_in, c_go = st.columns([5, 1.3])
+            with c_in:
+                top_query = st.text_input(
+                    "Search",
+                    value=st.session_state.last_query,
+                    placeholder="Search songs or artists...",
+                    label_visibility="collapsed",
+                )
+            with c_go:
+                go_clicked = st.form_submit_button("Search", use_container_width=True)
+    with col_fav_btn:
+        fav_btn_label = (
+            "Hide Favourites"
+            if st.session_state.show_favorites
+            else f"♥ Favourites ({len(st.session_state.favorites)})"
+        )
+        if st.button(fav_btn_label, key="top_favourites_bar_btn", use_container_width=True):
+            st.session_state.show_favorites = not st.session_state.show_favorites
+            st.rerun()
+
+    if go_clicked and top_query.strip():
+        run_search_from_top(top_query)
+
+
+def render_favorites_drawer_section() -> None:
+    if not st.session_state.show_favorites:
+        return
+    st.subheader("♥ Favourites")
+    if not st.session_state.favorites:
+        st.info("No favourite songs saved yet. Click ♡ on any song card to add one.")
+    else:
+        render_track_grid(st.session_state.favorites, key_prefix="fav_section")
+    st.divider()
+
+
 def render_sidebar() -> None:
     with st.sidebar:
         st.title("🎧 Spotify Streamer")
-        nav_options = ["Home", "Search", "Song Page"]
-        current_index = nav_options.index(st.session_state.page)
-        selected = st.radio("Navigation", nav_options, index=current_index)
-        if selected != st.session_state.page:
-            st.session_state.page = selected
+        if st.button("Home (Played Songs)", key="side_home_btn", use_container_width=True):
+            st.session_state.page = "Home"
+            st.session_state.show_favorites = False
+            st.rerun()
+        if st.button("Search", key="side_search_btn", use_container_width=True):
+            st.session_state.page = "Search"
+            st.session_state.show_favorites = False
+            st.rerun()
+        if st.button("Now Playing", key="side_player_btn", use_container_width=True):
+            st.session_state.page = "Song Page"
+            st.session_state.show_favorites = False
             st.rerun()
 
         st.divider()
-        st.subheader("♥ Favourites")
-        if not st.session_state.favorites:
-            st.caption("No saved favorites yet.")
-        else:
-            for idx, raw_fav in enumerate(st.session_state.favorites[:12]):
-                fav = normalize_track(raw_fav, fallback_index=idx)
-                if not fav:
-                    continue
-                fav_title = fav.get("title", "Untitled Track")
-                fav_artist = fav.get("artist", "Unknown Artist")
-                fav_id = fav.get("id", str(idx))
-                col_title, col_play = st.columns([4, 1])
-                with col_title:
-                    st.caption(f"**{fav_title}**\n{fav_artist}")
-                with col_play:
-                    if st.button("▶", key=f"side_fav_{idx}_{fav_id}"):
-                        open_song_page(fav, autoplay=True)
+        fav_side_label = (
+            "Hide Favourites"
+            if st.session_state.show_favorites
+            else f"♥ Favourites ({len(st.session_state.favorites)})"
+        )
+        if st.button(fav_side_label, key="side_fav_toggle_btn", use_container_width=True):
+            st.session_state.show_favorites = not st.session_state.show_favorites
+            st.rerun()
 
         current = normalize_track(st.session_state.current_track)
         if current:
@@ -378,50 +450,34 @@ def render_sidebar() -> None:
 
 
 def render_home_page() -> None:
-    st.header("Home — Recent History")
+    render_top_bar()
+    render_favorites_drawer_section()
+    st.header("Home — Previously Played Songs")
     if not st.session_state.history:
-        st.info("Your listening history is empty. Go to **Search** to find and play a song.")
-        if st.button("Go to Search"):
-            st.session_state.page = "Search"
-            st.rerun()
+        st.info("No previously played songs yet. Use the search bar above to find and play a song.")
         return
-    render_track_grid(st.session_state.history, key_prefix="home")
+    render_track_grid(st.session_state.history, key_prefix="home_history")
 
 
 def render_search_page() -> None:
-    st.header("Search")
-    with st.form("search_form", clear_on_submit=False):
-        col_input, col_btn = st.columns([5, 1])
-        with col_input:
-            query = st.text_input(
-                "Search songs or artists",
-                value=st.session_state.last_query,
-                placeholder="Search for a song, artist, or album...",
-                label_visibility="collapsed",
-            )
-        with col_btn:
-            submitted = st.form_submit_button("Search", use_container_width=True)
-
-    if submitted and query.strip():
-        st.session_state.last_query = query.strip()
-        with st.spinner("Searching tracks..."):
-            try:
-                st.session_state.search_results = search_tracks(query.strip(), limit=SEARCH_LIMIT)
-            except Exception as exc:
-                st.error(f"Search failed: {exc}")
-                st.session_state.search_results = []
-
+    render_top_bar()
+    render_favorites_drawer_section()
+    st.header("Search Results")
     if st.session_state.search_results:
         st.caption(f'Showing up to {SEARCH_LIMIT} results for "{st.session_state.last_query}"')
-        render_track_grid(st.session_state.search_results, key_prefix="search")
+        render_track_grid(st.session_state.search_results, key_prefix="search_results")
     elif st.session_state.last_query:
         st.warning("No matching tracks found. Try another search term.")
+    else:
+        st.info("Type a song or artist in the search bar at the top and click Search.")
 
 
 def render_song_page() -> None:
+    render_top_bar()
+    render_favorites_drawer_section()
     track = normalize_track(st.session_state.current_track)
     if not track:
-        st.info("No track selected yet. Search for a song or pick one from History.")
+        st.info("No track selected yet. Search for a song or pick one from Home.")
         return
 
     title = track.get("title", "Untitled Track")
@@ -437,7 +493,7 @@ def render_song_page() -> None:
         st.image(thumbnail, use_container_width=True)
 
     st.markdown(f"### {title}")
-    st.markdown(f'<div class="muted-caption">{artist}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="song-artist">{artist}</div>', unsafe_allow_html=True)
 
     total_seconds = int(track.get("duration") or 0)
     max_seek = max(total_seconds, 1)
