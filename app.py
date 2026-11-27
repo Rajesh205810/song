@@ -19,11 +19,22 @@ st.set_page_config(
     page_title="Spotify Streamer",
     page_icon="🎧",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 SPOTIFY_CSS = """
 <style>
+    @keyframes popIn {
+        0% {
+            opacity: 0;
+            transform: translateY(8px) scale(0.985);
+        }
+        100% {
+            opacity: 1;
+            transform: translateY(0) scale(1);
+        }
+    }
+
     .stApp, [data-testid="stAppViewContainer"], [data-testid="stHeader"] {
         background-color: #000000 !important;
         color: #ffffff !important;
@@ -31,6 +42,7 @@ SPOTIFY_CSS = """
     section[data-testid="stSidebar"] {
         background-color: #090909 !important;
         border-right: 1px solid #262626 !important;
+        transition: transform 0.28s cubic-bezier(0.22, 1, 0.36, 1), width 0.28s cubic-bezier(0.22, 1, 0.36, 1) !important;
     }
     section[data-testid="stSidebar"] * {
         color: #ffffff !important;
@@ -38,6 +50,7 @@ SPOTIFY_CSS = """
     .block-container {
         padding-top: 3.8rem !important;
         padding-bottom: 3rem !important;
+        animation: popIn 0.26s ease-out;
     }
     .top-bar-spacer {
         height: 12px;
@@ -48,6 +61,7 @@ SPOTIFY_CSS = """
     [data-testid="stCaptionContainer"], .stCaption {
         color: #d4d4d8 !important;
     }
+
     /* Pop-up search bar styling */
     [data-testid="stForm"] {
         background: #141417 !important;
@@ -56,12 +70,12 @@ SPOTIFY_CSS = """
         padding: 6px 12px !important;
         box-shadow: 0 8px 24px rgba(0, 0, 0, 0.75), 0 0 0 1px rgba(29, 185, 84, 0.18) !important;
         transform: translateY(0px);
-        transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease !important;
+        transition: transform 0.2s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.2s ease, border-color 0.2s ease !important;
     }
     [data-testid="stForm"]:hover, [data-testid="stForm"]:focus-within {
-        transform: translateY(-2px) !important;
+        transform: translateY(-3px) !important;
         border-color: #1db954 !important;
-        box-shadow: 0 14px 30px rgba(0, 0, 0, 0.88), 0 0 16px rgba(29, 185, 84, 0.35) !important;
+        box-shadow: 0 16px 32px rgba(0, 0, 0, 0.9), 0 0 18px rgba(29, 185, 84, 0.38) !important;
     }
     input[type="text"] {
         background-color: #1f1f24 !important;
@@ -73,12 +87,20 @@ SPOTIFY_CSS = """
     input[type="text"]::placeholder {
         color: #a1a1aa !important;
     }
+
     .song-card {
         background-color: #111111;
         border: 1px solid #27272a;
         border-radius: 12px;
         padding: 12px;
         margin-bottom: 14px;
+        animation: popIn 0.24s ease-out;
+        transition: transform 0.2s ease, border-color 0.2s ease, background-color 0.2s ease;
+    }
+    .song-card:hover {
+        transform: translateY(-2px);
+        border-color: #1db954;
+        background-color: #16161a;
     }
     .song-title {
         font-weight: 700;
@@ -105,6 +127,7 @@ SPOTIFY_CSS = """
         max-width: 580px;
         margin: 0 auto 24px auto;
         text-align: center;
+        animation: popIn 0.28s ease-out;
     }
     div.stButton > button, div.stFormSubmitButton > button {
         background-color: #1db954 !important;
@@ -115,10 +138,12 @@ SPOTIFY_CSS = """
         padding: 0.3rem 0.75rem !important;
         font-size: 0.84rem !important;
         min-height: 2.1rem !important;
+        transition: transform 0.14s ease, background-color 0.14s ease !important;
     }
     div.stButton > button:hover, div.stFormSubmitButton > button:hover {
         background-color: #1ed760 !important;
         color: #000000 !important;
+        transform: scale(1.02);
     }
 </style>
 """
@@ -206,6 +231,47 @@ def save_json_list(file_path: Path, items: List[Dict[str, Any]]) -> None:
             json.dump(items, f, indent=2, ensure_ascii=False)
     except OSError as exc:
         st.warning(f"Could not save {file_path.name}: {exc}")
+
+
+def trigger_sidebar_collapse_animation() -> None:
+    st.session_state.collapse_sidebar_once = True
+
+
+def render_sidebar_collapse_if_requested() -> None:
+    if not st.session_state.get("collapse_sidebar_once"):
+        return
+    st.session_state.collapse_sidebar_once = False
+    components.html(
+        """
+        <script>
+        (function() {
+            const parentDoc = window.parent.document;
+            let attempts = 0;
+            const interval = setInterval(() => {
+                attempts += 1;
+                const sidebar = parentDoc.querySelector('section[data-testid="stSidebar"]');
+                const isExpanded = sidebar && sidebar.getAttribute('aria-expanded') === 'true';
+                if (!sidebar || !isExpanded) {
+                    clearInterval(interval);
+                    return;
+                }
+                const closeBtn =
+                    parentDoc.querySelector('[data-testid="stSidebarCollapseButton"] button') ||
+                    parentDoc.querySelector('section[data-testid="stSidebar"] button[kind="header"]') ||
+                    parentDoc.querySelector('button[aria-label="Close sidebar"]');
+                if (closeBtn) {
+                    closeBtn.click();
+                    clearInterval(interval);
+                }
+                if (attempts >= 12) {
+                    clearInterval(interval);
+                }
+            }, 60);
+        })();
+        </script>
+        """,
+        height=0,
+    )
 
 
 def sync_favorites_to_browser(favorites: List[Dict[str, Any]]) -> None:
@@ -381,6 +447,8 @@ def init_state() -> None:
         st.session_state.page = "Home"
     if "show_favorites" not in st.session_state:
         st.session_state.show_favorites = False
+    if "collapse_sidebar_once" not in st.session_state:
+        st.session_state.collapse_sidebar_once = False
     if "favorites" not in st.session_state:
         st.session_state.favorites = load_json_list(FAVORITES_FILE, max_items=MAX_FAVORITES)
     if "history" not in st.session_state:
@@ -481,19 +549,6 @@ def open_song_page(
     st.rerun()
 
 
-def toggle_track_play_pause(track: Dict[str, Any]) -> None:
-    clean = normalize_track(track)
-    if not clean:
-        return
-    current = normalize_track(st.session_state.current_track)
-    is_same_track = bool(current and current.get("id") == clean.get("id"))
-    if is_same_track:
-        st.session_state.is_playing = not st.session_state.is_playing
-        st.rerun()
-    else:
-        open_song_page(clean, autoplay=True)
-
-
 def stop_playback() -> None:
     st.session_state.is_playing = False
     st.rerun()
@@ -519,40 +574,91 @@ def handle_query_auto_next() -> None:
         step_track(1, autoplay=True)
 
 
-def render_auto_advance_listener(is_playing: bool) -> None:
+def render_auto_advance_listener(
+    is_playing: bool,
+    title: str = "",
+    artist: str = "",
+    thumbnail: str = "",
+) -> None:
     if not is_playing:
         return
+    safe_title = json.dumps(title)
+    safe_artist = json.dumps(artist)
+    safe_thumb = json.dumps(thumbnail)
     components.html(
-        """
+        f"""
         <script>
-        (function() {
+        (function() {{
             const parentDoc = window.parent.document;
+            const parentWin = window.parent;
             let triggered = false;
-            const timer = setInterval(() => {
+
+            function advanceNow() {{
+                if (triggered) return;
+                triggered = true;
+                const nextBtn = Array.from(parentDoc.querySelectorAll('button')).find(
+                    (btn) => btn.innerText && btn.innerText.includes('Next')
+                );
+                if (nextBtn) {{
+                    nextBtn.click();
+                }} else {{
+                    const url = new URL(parentWin.location.href);
+                    url.searchParams.set('auto_next', '1');
+                    parentWin.location.href = url.toString();
+                }}
+            }}
+
+            try {{
+                if ('mediaSession' in navigator) {{
+                    navigator.mediaSession.metadata = new MediaMetadata({{
+                        title: {safe_title},
+                        artist: {safe_artist},
+                        artwork: [{{ src: {safe_thumb}, sizes: '512x512', type: 'image/jpeg' }}]
+                    }});
+                    navigator.mediaSession.setActionHandler('nexttrack', () => {{
+                        advanceNow();
+                    }});
+                }}
+            }} catch (e) {{}}
+
+            function bindAudioElements() {{
                 const audios = parentDoc.querySelectorAll('audio');
-                for (const audio of audios) {
-                    if (!audio.dataset.autoNextBound) {
-                        audio.dataset.autoNextBound = '1';
-                        audio.addEventListener('ended', () => {
-                            if (triggered) return;
-                            triggered = true;
-                            clearInterval(timer);
-                            const nextBtn = Array.from(parentDoc.querySelectorAll('button')).find(
-                                (btn) => btn.innerText && btn.innerText.includes('Next')
-                            );
-                            if (nextBtn) {
-                                nextBtn.click();
-                            } else {
-                                const url = new URL(window.parent.location.href);
-                                url.searchParams.set('auto_next', '1');
-                                window.parent.location.href = url.toString();
-                            }
-                        });
-                    }
-                }
-            }, 500);
-            setTimeout(() => clearInterval(timer), 3600000);
-        })();
+                for (const audio of audios) {{
+                    if (!audio.dataset.bgAutoNextBound) {{
+                        audio.dataset.bgAutoNextBound = '1';
+                        audio.addEventListener('ended', advanceNow);
+                        audio.addEventListener('timeupdate', () => {{
+                            if (
+                                !triggered &&
+                                audio.duration &&
+                                isFinite(audio.duration) &&
+                                audio.duration > 5 &&
+                                (audio.duration - audio.currentTime) <= 0.45
+                            ) {{
+                                advanceNow();
+                            }}
+                        }});
+                    }}
+                }}
+            }}
+
+            parentDoc.addEventListener('visibilitychange', () => {{
+                if (!triggered) {{
+                    bindAudioElements();
+                    const audios = parentDoc.querySelectorAll('audio');
+                    for (const audio of audios) {{
+                        if (audio.ended) {{
+                            advanceNow();
+                            break;
+                        }}
+                    }}
+                }}
+            }});
+
+            bindAudioElements();
+            const timer = setInterval(bindAudioElements, 400);
+            setTimeout(() => clearInterval(timer), 7200000);
+        }})();
         </script>
         """,
         height=0,
@@ -564,9 +670,6 @@ def render_track_grid(
     key_prefix: str,
     autoplay_on_open: bool = True,
 ) -> None:
-    current = normalize_track(st.session_state.current_track)
-    current_id = current.get("id") if current else None
-
     cols = st.columns(3)
     for idx, raw_track in enumerate(tracks):
         track = normalize_track(raw_track, fallback_index=idx)
@@ -581,24 +684,11 @@ def render_track_grid(
             artist = track.get("artist", "Unknown Artist")
             duration_str = format_duration(track.get("duration"))
             track_id = track.get("id", str(idx))
-            track_playing_now = bool(current_id == track_id and st.session_state.is_playing)
-            pp_icon = "⏸" if track_playing_now else "▶"
 
-            title_col, pp_col = st.columns([5, 1.3])
-            with title_col:
-                st.markdown(
-                    f'<div class="song-title" title="{title}">{title}</div>',
-                    unsafe_allow_html=True,
-                )
-            with pp_col:
-                if st.button(
-                    pp_icon,
-                    key=f"{key_prefix}_pp_{idx}_{track_id}",
-                    help="Play or Pause",
-                    use_container_width=True,
-                ):
-                    toggle_track_play_pause(track)
-
+            st.markdown(
+                f'<div class="song-title" title="{title}">{title}</div>',
+                unsafe_allow_html=True,
+            )
             st.markdown(
                 f'<div class="song-artist" title="{artist}">{artist} · {duration_str}</div>',
                 unsafe_allow_html=True,
@@ -622,6 +712,7 @@ def run_search_from_top(query: str) -> None:
         return
     st.session_state.last_query = clean_query
     st.session_state.show_favorites = False
+    trigger_sidebar_collapse_animation()
     with st.spinner("Searching tracks..."):
         try:
             st.session_state.search_results = search_tracks(clean_query, limit=SEARCH_LIMIT)
@@ -655,6 +746,7 @@ def render_top_bar() -> None:
         )
         if st.button(fav_btn_label, key="top_favourites_bar_btn", use_container_width=True):
             st.session_state.show_favorites = not st.session_state.show_favorites
+            trigger_sidebar_collapse_animation()
             st.rerun()
 
     if go_clicked and top_query.strip():
@@ -703,27 +795,27 @@ def render_recommendations_section(key_prefix: str) -> None:
 def render_sidebar() -> None:
     with st.sidebar:
         st.title("🎧 Spotify Streamer")
-        if st.button("Home (Played Songs)", key="side_home_btn", use_container_width=True):
+        if st.button("Home", key="side_home_btn", use_container_width=True):
             st.session_state.page = "Home"
             st.session_state.show_favorites = False
+            trigger_sidebar_collapse_animation()
             st.rerun()
         if st.button("Search", key="side_search_btn", use_container_width=True):
             st.session_state.page = "Search"
             st.session_state.show_favorites = False
+            trigger_sidebar_collapse_animation()
             st.rerun()
         if st.button("Now Playing", key="side_player_btn", use_container_width=True):
             st.session_state.page = "Song Page"
             st.session_state.show_favorites = False
+            trigger_sidebar_collapse_animation()
             st.rerun()
 
         st.divider()
-        fav_side_label = (
-            "Hide Favourites"
-            if st.session_state.show_favorites
-            else f"♥ Favourites ({len(st.session_state.favorites)}/{MAX_FAVORITES})"
-        )
+        fav_side_label = f"♥ Favourites ({len(st.session_state.favorites)}/{MAX_FAVORITES})"
         if st.button(fav_side_label, key="side_fav_toggle_btn", use_container_width=True):
-            st.session_state.show_favorites = not st.session_state.show_favorites
+            st.session_state.show_favorites = True
+            trigger_sidebar_collapse_animation()
             st.rerun()
 
         current = normalize_track(st.session_state.current_track)
@@ -773,7 +865,6 @@ def render_song_page() -> None:
     thumbnail = track.get("thumbnail", FALLBACK_THUMBNAIL)
     webpage_url = track.get("webpage_url", "")
     duration_str = format_duration(track.get("duration"))
-    pp_icon = "⏸" if st.session_state.is_playing else "▶"
 
     st.header("Now Playing")
     st.markdown('<div class="now-playing-box">', unsafe_allow_html=True)
@@ -781,13 +872,7 @@ def render_song_page() -> None:
     with img_col:
         st.image(thumbnail, use_container_width=True)
 
-    t_col, b_col = st.columns([5, 1.2])
-    with t_col:
-        st.markdown(f"### {title}")
-    with b_col:
-        if st.button(pp_icon, key="now_playing_title_pp", help="Play or Pause", use_container_width=True):
-            toggle_track_play_pause(track)
-
+    st.markdown(f"### {title}")
     st.markdown(f'<div class="song-artist">{artist} · {duration_str}</div>', unsafe_allow_html=True)
 
     if st.session_state.is_playing:
@@ -800,11 +885,16 @@ def render_song_page() -> None:
 
         if stream_url:
             st.audio(stream_url, format="audio/mp4", autoplay=True)
-            render_auto_advance_listener(is_playing=True)
+            render_auto_advance_listener(
+                is_playing=True,
+                title=title,
+                artist=artist,
+                thumbnail=thumbnail,
+            )
         else:
             st.warning("Direct audio stream unavailable for this track.")
     else:
-        st.caption("Stopped / Paused. Click ▶ next to the title to play.")
+        st.caption("Stopped. Click **Play** below to stream audio.")
 
     c_prev, c_next, c_stop, c_fav = st.columns(4)
     with c_prev:
@@ -831,6 +921,7 @@ def main() -> None:
     hydrate_favorites_from_browser_if_needed()
     handle_query_auto_next()
     render_sidebar()
+    render_sidebar_collapse_if_requested()
 
     if st.session_state.page == "Home":
         render_home_page()
