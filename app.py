@@ -9,6 +9,7 @@ import yt_dlp
 BASE_DIR = Path(__file__).resolve().parent
 FAVORITES_FILE = BASE_DIR / "favorites.json"
 HISTORY_FILE = BASE_DIR / "history.json"
+MAX_FAVORITES = 200
 MAX_HISTORY_ITEMS = 24
 SEARCH_LIMIT = 12
 RECOMMENDATION_LIMIT = 30
@@ -35,11 +36,11 @@ SPOTIFY_CSS = """
         color: #ffffff !important;
     }
     .block-container {
-        padding-top: 3.6rem !important;
+        padding-top: 3.8rem !important;
         padding-bottom: 3rem !important;
     }
     .top-bar-spacer {
-        height: 10px;
+        height: 12px;
     }
     h1, h2, h3, h4, p, label, span, div, .stMarkdown {
         color: #ffffff !important;
@@ -47,11 +48,27 @@ SPOTIFY_CSS = """
     [data-testid="stCaptionContainer"], .stCaption {
         color: #d4d4d8 !important;
     }
+    /* Pop-up search bar styling */
+    [data-testid="stForm"] {
+        background: #141417 !important;
+        border: 1.5px solid #2e2e36 !important;
+        border-radius: 999px !important;
+        padding: 6px 12px !important;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.75), 0 0 0 1px rgba(29, 185, 84, 0.18) !important;
+        transform: translateY(0px);
+        transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease !important;
+    }
+    [data-testid="stForm"]:hover, [data-testid="stForm"]:focus-within {
+        transform: translateY(-2px) !important;
+        border-color: #1db954 !important;
+        box-shadow: 0 14px 30px rgba(0, 0, 0, 0.88), 0 0 16px rgba(29, 185, 84, 0.35) !important;
+    }
     input[type="text"] {
-        background-color: #18181b !important;
+        background-color: #1f1f24 !important;
         color: #ffffff !important;
         border: 1px solid #3f3f46 !important;
         border-radius: 999px !important;
+        padding: 0.45rem 0.9rem !important;
     }
     input[type="text"]::placeholder {
         color: #a1a1aa !important;
@@ -161,7 +178,7 @@ def normalize_track(entry: Any, fallback_index: int = 0) -> Optional[Dict[str, A
     }
 
 
-def load_json_list(file_path: Path) -> List[Dict[str, Any]]:
+def load_json_list(file_path: Path, max_items: Optional[int] = None) -> List[Dict[str, Any]]:
     if not file_path.exists():
         return []
     try:
@@ -170,10 +187,14 @@ def load_json_list(file_path: Path) -> List[Dict[str, Any]]:
         if not isinstance(data, list):
             return []
         normalized: List[Dict[str, Any]] = []
+        seen_ids = set()
         for idx, item in enumerate(data):
             clean = normalize_track(item, fallback_index=idx)
-            if clean:
+            if clean and clean["id"] not in seen_ids:
+                seen_ids.add(clean["id"])
                 normalized.append(clean)
+                if max_items and len(normalized) >= max_items:
+                    break
         return normalized
     except (json.JSONDecodeError, OSError):
         return []
@@ -185,6 +206,70 @@ def save_json_list(file_path: Path, items: List[Dict[str, Any]]) -> None:
             json.dump(items, f, indent=2, ensure_ascii=False)
     except OSError as exc:
         st.warning(f"Could not save {file_path.name}: {exc}")
+
+
+def sync_favorites_to_browser(favorites: List[Dict[str, Any]]) -> None:
+    payload = json.dumps(favorites[:MAX_FAVORITES], ensure_ascii=False)
+    components.html(
+        f"""
+        <script>
+        (function() {{
+            try {{
+                window.localStorage.setItem('spotify_streamer_favorites_v1', {json.dumps(payload)});
+            }} catch (e) {{}}
+        }})();
+        </script>
+        """,
+        height=0,
+    )
+
+
+def hydrate_favorites_from_browser_if_needed() -> None:
+    if st.session_state.get("fav_hydrated"):
+        return
+    st.session_state.fav_hydrated = True
+    if st.query_params.get("fav_sync") == "1" and "fav_data" in st.query_params:
+        try:
+            raw = json.loads(st.query_params["fav_data"])
+            if isinstance(raw, list) and raw:
+                merged: List[Dict[str, Any]] = []
+                seen = set()
+                for idx, item in enumerate(st.session_state.favorites + raw):
+                    clean = normalize_track(item, fallback_index=idx)
+                    if clean and clean["id"] not in seen:
+                        seen.add(clean["id"])
+                        merged.append(clean)
+                        if len(merged) >= MAX_FAVORITES:
+                            break
+                st.session_state.favorites = merged
+                save_json_list(FAVORITES_FILE, merged)
+        except Exception:
+            pass
+        st.query_params.clear()
+        st.rerun()
+        return
+
+    if not st.session_state.favorites:
+        components.html(
+            """
+            <script>
+            (function() {
+                try {
+                    const saved = window.localStorage.getItem('spotify_streamer_favorites_v1');
+                    if (saved && saved.length > 2) {
+                        const url = new URL(window.parent.location.href);
+                        if (!url.searchParams.get('fav_sync')) {
+                            url.searchParams.set('fav_sync', '1');
+                            url.searchParams.set('fav_data', saved);
+                            window.parent.location.href = url.toString();
+                        }
+                    }
+                } catch (e) {}
+            })();
+            </script>
+            """,
+            height=0,
+        )
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -297,9 +382,9 @@ def init_state() -> None:
     if "show_favorites" not in st.session_state:
         st.session_state.show_favorites = False
     if "favorites" not in st.session_state:
-        st.session_state.favorites = load_json_list(FAVORITES_FILE)
+        st.session_state.favorites = load_json_list(FAVORITES_FILE, max_items=MAX_FAVORITES)
     if "history" not in st.session_state:
-        st.session_state.history = load_json_list(HISTORY_FILE)
+        st.session_state.history = load_json_list(HISTORY_FILE, max_items=MAX_HISTORY_ITEMS)
     if "recommendations" not in st.session_state:
         st.session_state.recommendations = []
     if "search_results" not in st.session_state:
@@ -326,14 +411,17 @@ def toggle_favorite(track: Dict[str, Any]) -> None:
         return
     track_id = safe_track["id"]
     if is_favorite(track_id):
-        st.session_state.favorites = [
+        updated = [
             item for item in st.session_state.favorites if item.get("id") != track_id
-        ]
+        ][:MAX_FAVORITES]
     else:
-        st.session_state.favorites = [safe_track] + [
+        remaining = [
             item for item in st.session_state.favorites if item.get("id") != track_id
         ]
-    save_json_list(FAVORITES_FILE, st.session_state.favorites)
+        updated = ([safe_track] + remaining)[:MAX_FAVORITES]
+    st.session_state.favorites = updated
+    save_json_list(FAVORITES_FILE, updated)
+    sync_favorites_to_browser(updated)
 
 
 def record_history(track: Dict[str, Any]) -> None:
@@ -342,19 +430,23 @@ def record_history(track: Dict[str, Any]) -> None:
         return
     track_id = safe_track["id"]
     filtered = [item for item in st.session_state.history if item.get("id") != track_id]
-    updated = [safe_track] + filtered
-    st.session_state.history = updated[:MAX_HISTORY_ITEMS]
-    save_json_list(HISTORY_FILE, st.session_state.history)
+    updated = ([safe_track] + filtered)[:MAX_HISTORY_ITEMS]
+    st.session_state.history = updated
+    save_json_list(HISTORY_FILE, updated)
 
 
-def build_queue(track: Dict[str, Any]) -> List[Dict[str, Any]]:
+def build_queue(track: Dict[str, Any], source_pool: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
     candidates: List[Dict[str, Any]] = []
-    for pool in (
+    pools = []
+    if source_pool:
+        pools.append(source_pool)
+    pools.extend([
         st.session_state.recommendations,
         st.session_state.search_results,
         st.session_state.history,
         st.session_state.favorites,
-    ):
+    ])
+    for pool in pools:
         for item in pool:
             clean = normalize_track(item)
             if clean and all(existing.get("id") != clean["id"] for existing in candidates):
@@ -365,7 +457,11 @@ def build_queue(track: Dict[str, Any]) -> List[Dict[str, Any]]:
     return candidates
 
 
-def open_song_page(track: Dict[str, Any], autoplay: bool = True) -> None:
+def open_song_page(
+    track: Dict[str, Any],
+    autoplay: bool = True,
+    source_pool: Optional[List[Dict[str, Any]]] = None,
+) -> None:
     clean = normalize_track(track)
     if not clean:
         return
@@ -381,7 +477,7 @@ def open_song_page(track: Dict[str, Any], autoplay: bool = True) -> None:
         last_query=st.session_state.last_query,
         limit=RECOMMENDATION_LIMIT,
     )
-    st.session_state.queue = build_queue(clean)
+    st.session_state.queue = build_queue(clean, source_pool=source_pool)
     st.rerun()
 
 
@@ -463,7 +559,11 @@ def render_auto_advance_listener(is_playing: bool) -> None:
     )
 
 
-def render_track_grid(tracks: List[Dict[str, Any]], key_prefix: str) -> None:
+def render_track_grid(
+    tracks: List[Dict[str, Any]],
+    key_prefix: str,
+    autoplay_on_open: bool = True,
+) -> None:
     current = normalize_track(st.session_state.current_track)
     current_id = current.get("id") if current else None
 
@@ -506,8 +606,8 @@ def render_track_grid(tracks: List[Dict[str, Any]], key_prefix: str) -> None:
 
             c1, c2 = st.columns([2, 1])
             with c1:
-                if st.button("Open", key=f"{key_prefix}_open_{idx}_{track_id}", use_container_width=True):
-                    open_song_page(track, autoplay=True)
+                if st.button("Play", key=f"{key_prefix}_open_{idx}_{track_id}", use_container_width=True):
+                    open_song_page(track, autoplay=autoplay_on_open, source_pool=tracks)
             with c2:
                 fav_label = "♥" if is_favorite(track_id) else "♡"
                 if st.button(fav_label, key=f"{key_prefix}_fav_{idx}_{track_id}", use_container_width=True):
@@ -534,7 +634,7 @@ def run_search_from_top(query: str) -> None:
 
 def render_top_bar() -> None:
     st.markdown('<div class="top-bar-spacer"></div>', unsafe_allow_html=True)
-    col_search, col_fav_btn = st.columns([5, 1.4])
+    col_search, col_fav_btn = st.columns([5.2, 1.3])
     with col_search:
         with st.form("top_home_search_form", clear_on_submit=False):
             c_in, c_go = st.columns([5, 1.3])
@@ -551,7 +651,7 @@ def render_top_bar() -> None:
         fav_btn_label = (
             "Hide Favourites"
             if st.session_state.show_favorites
-            else f"♥ Favourites ({len(st.session_state.favorites)})"
+            else f"♥ Favourites ({len(st.session_state.favorites)}/{MAX_FAVORITES})"
         )
         if st.button(fav_btn_label, key="top_favourites_bar_btn", use_container_width=True):
             st.session_state.show_favorites = not st.session_state.show_favorites
@@ -564,11 +664,15 @@ def render_top_bar() -> None:
 def render_favorites_drawer_section() -> None:
     if not st.session_state.show_favorites:
         return
-    st.subheader("♥ Favourites")
+    st.subheader(f"♥ Favourites ({len(st.session_state.favorites)} / {MAX_FAVORITES})")
     if not st.session_state.favorites:
         st.info("No favourite songs saved yet. Click ♡ on any song card to add one.")
     else:
-        render_track_grid(st.session_state.favorites, key_prefix="fav_section")
+        render_track_grid(
+            st.session_state.favorites,
+            key_prefix="fav_section",
+            autoplay_on_open=True,
+        )
     st.divider()
 
 
@@ -593,7 +697,7 @@ def render_recommendations_section(key_prefix: str) -> None:
         return
 
     st.subheader(f"Recommended Similar Songs ({len(recs)})")
-    render_track_grid(recs, key_prefix=key_prefix)
+    render_track_grid(recs, key_prefix=key_prefix, autoplay_on_open=True)
 
 
 def render_sidebar() -> None:
@@ -616,7 +720,7 @@ def render_sidebar() -> None:
         fav_side_label = (
             "Hide Favourites"
             if st.session_state.show_favorites
-            else f"♥ Favourites ({len(st.session_state.favorites)})"
+            else f"♥ Favourites ({len(st.session_state.favorites)}/{MAX_FAVORITES})"
         )
         if st.button(fav_side_label, key="side_fav_toggle_btn", use_container_width=True):
             st.session_state.show_favorites = not st.session_state.show_favorites
@@ -637,7 +741,7 @@ def render_home_page() -> None:
     if not st.session_state.history:
         st.info("No previously played songs yet. Use the search bar above to find and play a song.")
         return
-    render_track_grid(st.session_state.history, key_prefix="home_history")
+    render_track_grid(st.session_state.history, key_prefix="home_history", autoplay_on_open=True)
     st.divider()
     render_recommendations_section(key_prefix="home_recs")
 
@@ -648,7 +752,7 @@ def render_search_page() -> None:
     st.header("Search Results")
     if st.session_state.search_results:
         st.caption(f'Showing up to {SEARCH_LIMIT} results for "{st.session_state.last_query}"')
-        render_track_grid(st.session_state.search_results, key_prefix="search_results")
+        render_track_grid(st.session_state.search_results, key_prefix="search_results", autoplay_on_open=True)
     elif st.session_state.last_query:
         st.warning("No matching tracks found. Try another search term.")
     else:
@@ -686,7 +790,6 @@ def render_song_page() -> None:
 
     st.markdown(f'<div class="song-artist">{artist} · {duration_str}</div>', unsafe_allow_html=True)
 
-    # Audio player bar on the upper side
     if st.session_state.is_playing:
         with st.spinner("Loading audio stream..."):
             try:
@@ -703,7 +806,6 @@ def render_song_page() -> None:
     else:
         st.caption("Stopped / Paused. Click ▶ next to the title to play.")
 
-    # Smaller Prev, Next, Stop, and Favorite buttons below the audio bar
     c_prev, c_next, c_stop, c_fav = st.columns(4)
     with c_prev:
         if st.button("⏮ Prev", key="now_playing_prev_btn", use_container_width=True):
@@ -726,6 +828,7 @@ def render_song_page() -> None:
 
 def main() -> None:
     init_state()
+    hydrate_favorites_from_browser_if_needed()
     handle_query_auto_next()
     render_sidebar()
 
