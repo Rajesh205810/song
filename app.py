@@ -33,8 +33,11 @@ SPOTIFY_CSS = """
         color: #ffffff !important;
     }
     .block-container {
-        padding-top: 1.4rem;
-        padding-bottom: 3rem;
+        padding-top: 3.6rem !important;
+        padding-bottom: 3rem !important;
+    }
+    .top-bar-spacer {
+        height: 10px;
     }
     h1, h2, h3, h4, p, label, span, div, .stMarkdown {
         color: #ffffff !important;
@@ -50,6 +53,13 @@ SPOTIFY_CSS = """
     }
     input[type="text"]::placeholder {
         color: #a1a1aa !important;
+    }
+    [data-testid="stSlider"] [role="slider"] {
+        background-color: #ffffff !important;
+        border-color: #ffffff !important;
+    }
+    [data-testid="stSlider"] [data-testid="stThumbValue"] {
+        color: #ffffff !important;
     }
     .song-card {
         background-color: #111111;
@@ -244,8 +254,6 @@ def init_state() -> None:
         )
     if "is_playing" not in st.session_state:
         st.session_state.is_playing = False
-    if "seek_position" not in st.session_state:
-        st.session_state.seek_position = 0
     if "queue" not in st.session_state:
         st.session_state.queue = []
 
@@ -304,7 +312,6 @@ def open_song_page(track: Dict[str, Any], autoplay: bool = True) -> None:
         return
     st.session_state.current_track = clean
     st.session_state.queue = build_queue(clean)
-    st.session_state.seek_position = 0
     st.session_state.is_playing = autoplay
     st.session_state.show_favorites = False
     st.session_state.page = "Song Page"
@@ -377,6 +384,7 @@ def run_search_from_top(query: str) -> None:
 
 
 def render_top_bar() -> None:
+    st.markdown('<div class="top-bar-spacer"></div>', unsafe_allow_html=True)
     col_search, col_fav_btn = st.columns([5, 1.4])
     with col_search:
         with st.form("top_home_search_form", clear_on_submit=False):
@@ -485,6 +493,7 @@ def render_song_page() -> None:
     track_id = track.get("id", "current")
     thumbnail = track.get("thumbnail", FALLBACK_THUMBNAIL)
     webpage_url = track.get("webpage_url", "")
+    duration_str = format_duration(track.get("duration"))
 
     st.header("Now Playing")
     st.markdown('<div class="now-playing-box">', unsafe_allow_html=True)
@@ -493,27 +502,7 @@ def render_song_page() -> None:
         st.image(thumbnail, use_container_width=True)
 
     st.markdown(f"### {title}")
-    st.markdown(f'<div class="song-artist">{artist}</div>', unsafe_allow_html=True)
-
-    total_seconds = int(track.get("duration") or 0)
-    max_seek = max(total_seconds, 1)
-    current_seek = min(int(st.session_state.seek_position), max_seek)
-
-    seek_val = st.slider(
-        "Seek position",
-        min_value=0,
-        max_value=max_seek,
-        value=current_seek,
-        label_visibility="collapsed",
-        key=f"seek_slider_{track_id}",
-    )
-    st.session_state.seek_position = seek_val
-
-    t_left, t_right = st.columns(2)
-    with t_left:
-        st.caption(format_duration(seek_val))
-    with t_right:
-        st.caption(format_duration(total_seconds))
+    st.markdown(f'<div class="song-artist">{artist} · {duration_str}</div>', unsafe_allow_html=True)
 
     c_prev, c_play, c_next, c_fav = st.columns(4)
     with c_prev:
@@ -542,7 +531,7 @@ def render_song_page() -> None:
                 st.error(f"Could not extract audio stream: {exc}")
 
         if stream_url:
-            st.audio(stream_url, format="audio/mp4", start_time=int(seek_val))
+            st.audio(stream_url, format="audio/mp4")
         else:
             st.warning("Direct audio stream unavailable for this track.")
     else:
