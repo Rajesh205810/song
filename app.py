@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -62,7 +64,6 @@ SPOTIFY_CSS = """
         color: #d4d4d8 !important;
     }
 
-    /* Pop-up search bar styling */
     [data-testid="stForm"] {
         background: #141417 !important;
         border: 1.5px solid #2e2e36 !important;
@@ -150,6 +151,14 @@ SPOTIFY_CSS = """
 st.markdown(SPOTIFY_CSS, unsafe_allow_html=True)
 
 
+def get_gist_config() -> tuple[Optional[str], Optional[str]]:
+    token = st.secrets.get("GITHUB_TOKEN") if "GITHUB_TOKEN" in st.secrets else None
+    gist_id = st.secrets.get("GIST_ID") if "GIST_ID" in st.secrets else None
+    if token and gist_id:
+        return str(token).strip(), str(gist_id).strip()
+    return None, None
+
+
 def format_duration(seconds: Optional[float]) -> str:
     if not seconds or seconds <= 0:
         return "0:00"
@@ -203,34 +212,104 @@ def normalize_track(entry: Any, fallback_index: int = 0) -> Optional[Dict[str, A
     }
 
 
+def parse_track_list(raw_data: Any, max_items: Optional[int] = None) -> List[Dict[str, Any]]:
+    if not isinstance(raw_data, list):
+        return []
+    normalized: List[Dict[str, Any]] = []
+    seen_ids = set()
+    for idx, item in enumerate(raw_data):
+        clean = normalize_track(item, fallback_index=idx)
+        if clean and clean["id"] not in seen_ids:
+            seen_ids.add(clean["id"])
+            normalized.append(clean)
+            if max_items and len(normalized) >= max_items:
+                break
+    return normalized
+
+
+def fetch_gist_files() -> Optional[Dict[str, Any]]:
+    token, gist_id = get_gist_config()
+    if not token or not gist_id:
+        return None
+    url = f"https://api.github.com/gists/{gist_id}"
+    req = Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "SpotifyStreamerApp",
+        },
+        method="GET",
+    )
+    try:
+        with urlopen(req, timeout=12) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+        files = payload.get("files")
+        return files if isinstance(files, dict) else None
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, OSError):
+        return None
+
+
+def patch_gist_file(filename: str, content_str: str) -> bool:
+    token, gist_id = get_gist_config()
+    if not token or not gist_id:
+        return False
+    url = f"https://api.github.com/gists/{gist_id}"
+    body = json.dumps({"files": {filename: {"content": content_str}}}).encode("utf-8")
+    req = Request(
+        url,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "Content-Type": "application/json",
+            "User-Agent": "SpotifyStreamerApp",
+        },
+        method="PATCH",
+    )
+    try:
+        with urlopen(req, timeout=12) as resp:
+            return 200 <= resp.status < 300
+    except (HTTPError, URLError, TimeoutError, OSError) as exc:
+        st.warning(f"Could not sync {filename} to Gist: {exc}")
+        return False
+
+
 def load_json_list(file_path: Path, max_items: Optional[int] = None) -> List[Dict[str, Any]]:
+    token, gist_id = get_gist_config()
+    if token and gist_id:
+        files = fetch_gist_files()
+        if files and file_path.name in files:
+            file_obj = files[file_path.name]
+            raw_content = file_obj.get("content") if isinstance(file_obj, dict) else None
+            if isinstance(raw_content, str) and raw_content.strip():
+                try:
+                    parsed = json.loads(raw_content)
+                    return parse_track_list(parsed, max_items=max_items)
+                except json.JSONDecodeError:
+                    pass
+
     if not file_path.exists():
         return []
     try:
         with file_path.open("r", encoding="utf-8") as f:
             data = json.load(f)
-        if not isinstance(data, list):
-            return []
-        normalized: List[Dict[str, Any]] = []
-        seen_ids = set()
-        for idx, item in enumerate(data):
-            clean = normalize_track(item, fallback_index=idx)
-            if clean and clean["id"] not in seen_ids:
-                seen_ids.add(clean["id"])
-                normalized.append(clean)
-                if max_items and len(normalized) >= max_items:
-                    break
-        return normalized
+        return parse_track_list(data, max_items=max_items)
     except (json.JSONDecodeError, OSError):
         return []
 
 
 def save_json_list(file_path: Path, items: List[Dict[str, Any]]) -> None:
+    serialized = json.dumps(items, indent=2, ensure_ascii=False)
     try:
         with file_path.open("w", encoding="utf-8") as f:
-            json.dump(items, f, indent=2, ensure_ascii=False)
-    except OSError as exc:
-        st.warning(f"Could not save {file_path.name}: {exc}")
+            f.write(serialized)
+    except OSError:
+        pass
+
+    token, gist_id = get_gist_config()
+    if token and gist_id:
+        patch_gist_file(file_path.name, serialized)
 
 
 def trigger_sidebar_collapse_animation() -> None:
@@ -272,70 +351,6 @@ def render_sidebar_collapse_if_requested() -> None:
         """,
         height=0,
     )
-
-
-def sync_favorites_to_browser(favorites: List[Dict[str, Any]]) -> None:
-    payload = json.dumps(favorites[:MAX_FAVORITES], ensure_ascii=False)
-    components.html(
-        f"""
-        <script>
-        (function() {{
-            try {{
-                window.localStorage.setItem('spotify_streamer_favorites_v1', {json.dumps(payload)});
-            }} catch (e) {{}}
-        }})();
-        </script>
-        """,
-        height=0,
-    )
-
-
-def hydrate_favorites_from_browser_if_needed() -> None:
-    if st.session_state.get("fav_hydrated"):
-        return
-    st.session_state.fav_hydrated = True
-    if st.query_params.get("fav_sync") == "1" and "fav_data" in st.query_params:
-        try:
-            raw = json.loads(st.query_params["fav_data"])
-            if isinstance(raw, list) and raw:
-                merged: List[Dict[str, Any]] = []
-                seen = set()
-                for idx, item in enumerate(st.session_state.favorites + raw):
-                    clean = normalize_track(item, fallback_index=idx)
-                    if clean and clean["id"] not in seen:
-                        seen.add(clean["id"])
-                        merged.append(clean)
-                        if len(merged) >= MAX_FAVORITES:
-                            break
-                st.session_state.favorites = merged
-                save_json_list(FAVORITES_FILE, merged)
-        except Exception:
-            pass
-        st.query_params.clear()
-        st.rerun()
-        return
-
-    if not st.session_state.favorites:
-        components.html(
-            """
-            <script>
-            (function() {
-                try {
-                    const saved = window.localStorage.getItem('spotify_streamer_favorites_v1');
-                    if (saved && saved.length > 2) {
-                        const url = new URL(window.parent.location.href);
-                        if (!url.searchParams.get('fav_sync')) {
-                            url.searchParams.set('fav_sync', '1');
-                            url.searchParams.set('fav_data', saved);
-                            window.parent.location.href = url.toString();
-                        }
-                    }
-                } catch (e) {}
-            })();
-            </script>
-            """,
-            height=0,
-        )
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -489,7 +504,6 @@ def toggle_favorite(track: Dict[str, Any]) -> None:
         updated = ([safe_track] + remaining)[:MAX_FAVORITES]
     st.session_state.favorites = updated
     save_json_list(FAVORITES_FILE, updated)
-    sync_favorites_to_browser(updated)
 
 
 def record_history(track: Dict[str, Any]) -> None:
@@ -918,7 +932,6 @@ def render_song_page() -> None:
 
 def main() -> None:
     init_state()
-    hydrate_favorites_from_browser_if_needed()
     handle_query_auto_next()
     render_sidebar()
     render_sidebar_collapse_if_requested()
