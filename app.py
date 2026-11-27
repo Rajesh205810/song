@@ -1,590 +1,472 @@
 import json
-import uuid
+import os
+import subprocess
+import sys
 from pathlib import Path
-from urllib.parse import quote
+from typing import Any, Dict, List, Optional
+
+try:
+    import yt_dlp
+except ModuleNotFoundError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "yt-dlp"])
+    import yt_dlp
+
 import streamlit as st
-import yt_dlp
 
-st.set_page_config(page_title="Spotify-Style Personal Streamer", layout="wide")
+BASE_DIR = Path(__file__).resolve().parent
+FAVORITES_FILE = BASE_DIR / "favorites.json"
+HISTORY_FILE = BASE_DIR / "history.json"
+MAX_HISTORY_ITEMS = 24
+SEARCH_LIMIT = 12
 
-FAVORITES_FILE = Path(__file__).with_name("favorites.json")
-HISTORY_FILE = Path(__file__).with_name("history.json")
-
-
-def load_json_list(path: Path) -> list[dict]:
-    if not path.exists():
-        return []
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, list) else []
-    except Exception:
-        return []
-
-
-def save_json_list(path: Path, items: list[dict]) -> None:
-    path.write_text(json.dumps(items, indent=2, ensure_ascii=False), encoding="utf-8")
-
-
-if "search_results" not in st.session_state:
-    st.session_state.search_results = []
-if "playlist" not in st.session_state:
-    st.session_state.playlist = []
-if "favorites" not in st.session_state:
-    st.session_state.favorites = load_json_list(FAVORITES_FILE)
-if "history" not in st.session_state:
-    st.session_state.history = load_json_list(HISTORY_FILE)
-if "current_idx" not in st.session_state:
-    st.session_state.current_idx = 0
-if "fav_cursor" not in st.session_state:
-    st.session_state.fav_cursor = -1
-if "seek_sec" not in st.session_state:
-    st.session_state.seek_sec = 0
-if "is_playing" not in st.session_state:
-    st.session_state.is_playing = True
-if "active_view" not in st.session_state:
-    st.session_state.active_view = "home"
-
-st.markdown(
-    """
-    <style>
-        .stApp {
-            background-color: #121212;
-            color: #FFFFFF;
-        }
-        [data-testid="stHeader"] {
-            background-color: #121212;
-        }
-        .spotify-banner {
-            background: linear-gradient(180deg, #1db95438 0%, #181818 100%);
-            border: 1px solid #282828;
-            border-radius: 12px;
-            padding: 16px 22px;
-            margin-bottom: 16px;
-        }
-        .spotify-pill {
-            display: inline-block;
-            background-color: #1DB954;
-            color: #000000;
-            font-weight: 700;
-            font-size: 11px;
-            letter-spacing: 0.08em;
-            padding: 3px 9px;
-            border-radius: 999px;
-            margin-bottom: 6px;
-        }
-        .center-timer {
-            text-align: center;
-            color: #B3B3B3;
-            font-size: 1rem;
-            font-weight: 600;
-            margin: 8px 0 6px 0;
-        }
-        .center-title {
-            text-align: center;
-            margin: 6px 0 2px 0;
-        }
-        .center-artist {
-            text-align: center;
-            color: #B3B3B3;
-            font-size: 0.9rem;
-            margin-bottom: 10px;
-        }
-        .muted-text {
-            color: #B3B3B3;
-            font-size: 0.85rem;
-        }
-        div[data-testid="stButton"] > button,
-        div[data-testid="stFormSubmitButton"] > button {
-            background-color: #282828 !important;
-            color: #FFFFFF !important;
-            border: 1px solid #3E3E3E !important;
-            border-radius: 999px !important;
-            font-weight: 600 !important;
-        }
-        div[data-testid="stButton"] > button:hover,
-        div[data-testid="stFormSubmitButton"] > button:hover {
-            background-color: #333333 !important;
-            color: #FFFFFF !important;
-            border-color: #535353 !important;
-        }
-        div[data-testid="stButton"] > button:disabled,
-        div[data-testid="stFormSubmitButton"] > button:disabled {
-            background-color: #1C1C1C !important;
-            color: #6A6A6A !important;
-            border-color: #262626 !important;
-        }
-        div[data-testid="stButton"] > button[kind="primary"],
-        div[data-testid="stFormSubmitButton"] > button[kind="primary"] {
-            background-color: #1DB954 !important;
-            color: #000000 !important;
-            border: none !important;
-        }
-        div[data-testid="stButton"] > button[kind="primary"]:hover,
-        div[data-testid="stFormSubmitButton"] > button[kind="primary"]:hover {
-            background-color: #1ED760 !important;
-            color: #000000 !important;
-        }
-        div[data-testid="stImage"] img {
-            border-radius: 12px;
-        }
-    </style>
-    """,
-    unsafe_allow_html=True,
+st.set_page_config(
+    page_title="Spotify Streamer",
+    page_icon="🎧",
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
+SPOTIFY_CSS = """
+<style>
+    .stApp {
+        background: linear-gradient(180deg, #191414 0%, #121212 38%, #0b0b0b 100%);
+        color: #ffffff;
+    }
+    section[data-testid="stSidebar"] {
+        background-color: #000000;
+        border-right: 1px solid #242424;
+    }
+    .block-container {
+        padding-top: 1.5rem;
+        padding-bottom: 3rem;
+    }
+    .song-card {
+        background-color: #181818;
+        border: 1px solid #282828;
+        border-radius: 12px;
+        padding: 12px;
+        margin-bottom: 14px;
+        transition: background-color 0.2s ease;
+    }
+    .song-card:hover {
+        background-color: #242424;
+    }
+    .song-title {
+        font-weight: 700;
+        font-size: 0.98rem;
+        color: #ffffff;
+        margin-top: 8px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .song-artist {
+        font-size: 0.84rem;
+        color: #b3b3b3;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        margin-bottom: 8px;
+    }
+    .now-playing-box {
+        background: rgba(24, 24, 24, 0.92);
+        border: 1px solid #282828;
+        border-radius: 16px;
+        padding: 24px;
+        max-width: 560px;
+        margin: 0 auto 20px auto;
+        text-align: center;
+    }
+    .muted-caption {
+        color: #b3b3b3;
+        font-size: 0.88rem;
+    }
+    div.stButton > button {
+        border-radius: 999px;
+        font-weight: 600;
+    }
+</style>
+"""
+st.markdown(SPOTIFY_CSS, unsafe_allow_html=True)
 
-def format_duration(seconds: int | None) -> str:
-    if not seconds or seconds < 0:
+
+def load_json_list(file_path: Path) -> List[Dict[str, Any]]:
+    if not file_path.exists():
+        return []
+    try:
+        with file_path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def save_json_list(file_path: Path, items: List[Dict[str, Any]]) -> None:
+    try:
+        with file_path.open("w", encoding="utf-8") as f:
+            json.dump(items, f, indent=2, ensure_ascii=False)
+    except OSError as exc:
+        st.warning(f"Could not save {file_path.name}: {exc}")
+
+
+def format_duration(seconds: Optional[float]) -> str:
+    if not seconds or seconds <= 0:
         return "0:00"
-    mins, secs = divmod(int(seconds), 60)
+    total = int(seconds)
+    mins, secs = divmod(total, 60)
     hours, mins = divmod(mins, 60)
     if hours > 0:
         return f"{hours}:{mins:02d}:{secs:02d}"
     return f"{mins}:{secs:02d}"
 
 
-def record_history(track: dict) -> None:
-    history = st.session_state.history
-    history = [h for h in history if str(h.get("id")) != str(track.get("id"))]
-    entry = {
-        "id": str(track.get("id")),
-        "uuid": str(track.get("uuid") or uuid.uuid4()),
-        "title": track.get("title", "Unknown Title"),
-        "uploader": track.get("uploader", "Unknown Artist"),
-        "duration": track.get("duration", 0),
-        "thumbnail": track.get("thumbnail"),
-        "webpage_url": track.get("webpage_url", ""),
+def pick_thumbnail(entry: Dict[str, Any]) -> str:
+    if entry.get("thumbnail"):
+        return str(entry["thumbnail"])
+    thumbs = entry.get("thumbnails")
+    if isinstance(thumbs, list) and thumbs:
+        for item in reversed(thumbs):
+            if isinstance(item, dict) and item.get("url"):
+                return str(item["url"])
+    return "https://via.placeholder.com/600x600/181818/1DB954?text=No+Cover+Art"
+
+
+def normalize_entry(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not isinstance(entry, dict):
+        return None
+    video_id = entry.get("id") or entry.get("webpage_url_basename")
+    url = entry.get("webpage_url") or entry.get("url")
+    if not url and video_id:
+        url = f"https://www.youtube.com/watch?v={video_id}"
+    if not url:
+        return None
+    title = entry.get("title") or "Untitled Track"
+    artist = (
+        entry.get("artist")
+        or entry.get("uploader")
+        or entry.get("channel")
+        or "Unknown Artist"
+    )
+    duration = entry.get("duration") or 0
+    return {
+        "id": str(video_id or url),
+        "title": str(title),
+        "artist": str(artist),
+        "duration": float(duration) if duration else 0.0,
+        "thumbnail": pick_thumbnail(entry),
+        "webpage_url": str(url),
     }
-    history.insert(0, entry)
-    st.session_state.history = history[:40]
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def search_tracks(query: str, limit: int = SEARCH_LIMIT) -> List[Dict[str, Any]]:
+    clean_query = query.strip()
+    if not clean_query:
+        return []
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "extract_flat": "in_playlist",
+        "skip_download": True,
+    }
+    search_target = f"ytsearch{limit}:{clean_query}"
+    tracks: List[Dict[str, Any]] = []
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(search_target, download=False)
+    entries = info.get("entries") if isinstance(info, dict) else []
+    for raw in entries or []:
+        track = normalize_entry(raw)
+        if track:
+            tracks.append(track)
+    return tracks[:limit]
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def resolve_stream_url(webpage_url: str) -> Optional[str]:
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "format": "bestaudio[ext=m4a]/bestaudio/best",
+        "noplaylist": True,
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(webpage_url, download=False)
+    if not isinstance(info, dict):
+        return None
+    if info.get("url"):
+        return str(info["url"])
+    formats = info.get("formats") or []
+    for fmt in reversed(formats):
+        if isinstance(fmt, dict) and fmt.get("url") and fmt.get("acodec") != "none":
+            return str(fmt["url"])
+    return None
+
+
+def init_state() -> None:
+    if "page" not in st.session_state:
+        st.session_state.page = "Home"
+    if "favorites" not in st.session_state:
+        st.session_state.favorites = load_json_list(FAVORITES_FILE)
+    if "history" not in st.session_state:
+        st.session_state.history = load_json_list(HISTORY_FILE)
+    if "search_results" not in st.session_state:
+        st.session_state.search_results = []
+    if "last_query" not in st.session_state:
+        st.session_state.last_query = ""
+    if "current_track" not in st.session_state:
+        st.session_state.current_track = (
+            st.session_state.history[0] if st.session_state.history else None
+        )
+    if "is_playing" not in st.session_state:
+        st.session_state.is_playing = False
+    if "seek_position" not in st.session_state:
+        st.session_state.seek_position = 0
+    if "queue" not in st.session_state:
+        st.session_state.queue = []
+
+
+def is_favorite(track_id: str) -> bool:
+    return any(item.get("id") == track_id for item in st.session_state.favorites)
+
+
+def toggle_favorite(track: Dict[str, Any]) -> None:
+    track_id = track.get("id")
+    if not track_id:
+        return
+    if is_favorite(track_id):
+        st.session_state.favorites = [
+            item for item in st.session_state.favorites if item.get("id") != track_id
+        ]
+    else:
+        st.session_state.favorites = [track] + [
+            item for item in st.session_state.favorites if item.get("id") != track_id
+        ]
+    save_json_list(FAVORITES_FILE, st.session_state.favorites)
+
+
+def record_history(track: Dict[str, Any]) -> None:
+    track_id = track.get("id")
+    filtered = [item for item in st.session_state.history if item.get("id") != track_id]
+    updated = [track] + filtered
+    st.session_state.history = updated[:MAX_HISTORY_ITEMS]
     save_json_list(HISTORY_FILE, st.session_state.history)
 
 
-def is_favorite(track: dict) -> bool:
-    return any(str(f.get("id")) == str(track.get("id")) for f in st.session_state.favorites)
+def build_queue(track: Dict[str, Any]) -> List[Dict[str, Any]]:
+    candidates: List[Dict[str, Any]] = []
+    for pool in (st.session_state.search_results, st.session_state.history, st.session_state.favorites):
+        for item in pool:
+            if item.get("id") and all(existing.get("id") != item.get("id") for existing in candidates):
+                candidates.append(item)
+    if all(existing.get("id") != track.get("id") for existing in candidates):
+        candidates.insert(0, track)
+    return candidates
 
 
-def toggle_favorite(track: dict) -> None:
-    favs = st.session_state.favorites
-    match_idx = next((i for i, f in enumerate(favs) if str(f.get("id")) == str(track.get("id"))), None)
-    if match_idx is not None:
-        favs.pop(match_idx)
-        st.toast(f"Removed from Favourites: {track['title']}")
-    else:
-        saved_entry = {
-            "id": str(track.get("id")),
-            "uuid": str(track.get("uuid") or uuid.uuid4()),
-            "title": track.get("title", "Unknown Title"),
-            "uploader": track.get("uploader", "Unknown Artist"),
-            "duration": track.get("duration", 0),
-            "thumbnail": track.get("thumbnail"),
-            "webpage_url": track.get("webpage_url", ""),
-        }
-        favs.append(saved_entry)
-        st.toast(f"Saved to Favourites: {track['title']}")
-    save_json_list(FAVORITES_FILE, favs)
+def open_song_page(track: Dict[str, Any], autoplay: bool = True) -> None:
+    st.session_state.current_track = track
+    st.session_state.queue = build_queue(track)
+    st.session_state.seek_position = 0
+    st.session_state.is_playing = autoplay
+    st.session_state.page = "Song Page"
+    record_history(track)
+    st.rerun()
 
 
-def clear_all_favorites() -> None:
-    st.session_state.favorites = []
-    st.session_state.fav_cursor = -1
-    if FAVORITES_FILE.exists():
-        FAVORITES_FILE.unlink()
-    st.toast("Cleared all saved favourites.")
-
-
-def clear_history() -> None:
-    st.session_state.history = []
-    if HISTORY_FILE.exists():
-        HISTORY_FILE.unlink()
-    st.toast("Cleared played history.")
-
-
-@st.cache_data(ttl=3600, show_spinner="Searching YouTube...")
-def search_tracks(query: str, limit: int = 12) -> list[dict]:
-    target = query.strip()
-    if not target:
-        return []
-
-    search_target = target if target.startswith(("http://", "https://")) else f"ytsearch{limit}:{target}"
-
-    ydl_opts = {
-        "format": "ba[ext=m4a]/ba/bestaudio",
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-        "extract_flat": False,
-    }
-
-    tracks: list[dict] = []
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(search_target, download=False)
-        entries = info.get("entries") if isinstance(info, dict) and "entries" in info else [info]
-
-        for entry in entries or []:
-            if not entry or not entry.get("url"):
-                continue
-            vid = str(entry.get("id") or entry.get("url"))
-            tracks.append(
-                {
-                    "id": vid,
-                    "uuid": str(uuid.uuid4()),
-                    "title": entry.get("title", "Unknown Title"),
-                    "uploader": entry.get("uploader") or entry.get("channel") or "Unknown Artist",
-                    "duration": entry.get("duration") or 0,
-                    "url": entry.get("url"),
-                    "thumbnail": entry.get("thumbnail"),
-                    "webpage_url": entry.get("webpage_url") or f"https://www.youtube.com/watch?v={vid}",
-                }
-            )
-    return tracks
-
-
-@st.cache_data(ttl=3600, show_spinner="Fetching stream...")
-def fetch_by_id(song_id: str) -> dict | None:
-    clean_id = str(song_id).strip()
-    if not clean_id:
-        return None
-    target = clean_id if clean_id.startswith(("http://", "https://")) else f"https://www.youtube.com/watch?v={clean_id}"
-    results = search_tracks(target, limit=1)
-    return results[0] if results else None
-
-
-def ensure_playable_url(track: dict) -> dict:
-    if track.get("url"):
-        return track
-    fresh = fetch_by_id(str(track.get("id", "")))
-    if fresh and fresh.get("url"):
-        merged = dict(track)
-        merged["url"] = fresh["url"]
-        merged["duration"] = track.get("duration") or fresh.get("duration") or 0
-        merged["thumbnail"] = track.get("thumbnail") or fresh.get("thumbnail")
-        merged["webpage_url"] = track.get("webpage_url") or fresh.get("webpage_url")
-        return merged
-    return track
-
-
-def add_to_playlist(track: dict) -> int:
-    playlist = st.session_state.playlist
-    match_idx = next((i for i, item in enumerate(playlist) if str(item["id"]) == str(track["id"])), None)
-    if match_idx is not None:
-        return match_idx
-    item_copy = dict(track)
-    if not item_copy.get("uuid"):
-        item_copy["uuid"] = str(uuid.uuid4())
-    playlist.append(item_copy)
-    return len(playlist) - 1
-
-
-def open_and_play_song(track: dict, start_sec: int = 0, add_hist: bool = True) -> None:
-    idx = add_to_playlist(track)
-    active_track = ensure_playable_url(st.session_state.playlist[idx])
-    st.session_state.playlist[idx] = active_track
-    st.session_state.current_idx = idx
-    st.session_state.seek_sec = start_sec
-    st.session_state.is_playing = True
-    if add_hist:
-        record_history(active_track)
-    st.query_params["song"] = str(active_track["id"])
-    st.query_params["title"] = quote(active_track["title"])
-
-
-def play_previous_repeat(current_track: dict) -> None:
-    hist = st.session_state.history
-    prev_candidate = None
-    for item in hist:
-        if str(item.get("id")) != str(current_track.get("id")):
-            prev_candidate = item
-            break
-    target_track = prev_candidate or current_track
-    open_and_play_song(target_track, start_sec=0, add_hist=True)
-
-
-def play_next_from_favorites(current_track: dict) -> None:
-    favs = st.session_state.favorites
-    if not favs:
-        st.toast("No songs in Favourites yet.")
+def step_track(delta: int) -> None:
+    current = st.session_state.current_track
+    queue = st.session_state.queue or build_queue(current) if current else []
+    if not queue or not current:
         return
-
-    cur_id = str(current_track.get("id"))
-    matched_idx = next((i for i, f in enumerate(favs) if str(f.get("id")) == cur_id), -1)
-    if matched_idx >= 0:
-        next_idx = (matched_idx + 1) % len(favs)
-    else:
-        next_idx = (st.session_state.fav_cursor + 1) % len(favs)
-
-    st.session_state.fav_cursor = next_idx
-    open_and_play_song(favs[next_idx], start_sec=0, add_hist=True)
+    ids = [item.get("id") for item in queue]
+    try:
+        idx = ids.index(current.get("id"))
+    except ValueError:
+        idx = 0
+    next_idx = (idx + delta) % len(queue)
+    open_song_page(queue[next_idx], autoplay=True)
 
 
-def render_favourites_and_search_below() -> None:
-    st.markdown("---")
-    tab_favs, tab_search = st.tabs(["My Favourites", "Search Songs & Versions"])
-
-    with tab_favs:
-        f_top_l, f_top_r = st.columns([5, 1.5])
-        with f_top_l:
-            st.markdown(f"### Favourites ({len(st.session_state.favorites)})")
-        with f_top_r:
-            if st.session_state.favorites and st.button("Clean All", key="below_clean_favs", width="stretch"):
-                clear_all_favorites()
-                st.rerun()
-
-        if st.session_state.favorites:
-            for f_idx, f_track in enumerate(st.session_state.favorites):
-                c1, c2, c3, c4 = st.columns([0.9, 3.6, 1.1, 0.9])
-                with c1:
-                    if f_track.get("thumbnail"):
-                        st.image(f_track["thumbnail"], width="stretch")
-                with c2:
-                    st.markdown(f"**♥ {f_track['title']}**")
-                    st.caption(f"{f_track.get('uploader', 'Unknown')} • {format_duration(f_track.get('duration'))}")
-                with c3:
-                    if st.button("Play", key=f"below_fav_play_{f_idx}", type="primary", width="stretch"):
-                        st.session_state.fav_cursor = f_idx
-                        open_and_play_song(f_track)
-                        st.rerun()
-                with c4:
-                    if st.button("✕", key=f"below_fav_rm_{f_idx}", help="Remove favourite", width="stretch"):
-                        toggle_favorite(f_track)
-                        st.rerun()
-                st.divider()
-        else:
-            st.info("No favourite songs saved yet. Click the favourite button under a song to keep it here.")
-
-    with tab_search:
-        with st.form("below_search_form", clear_on_submit=False):
-            q_col, b_col = st.columns([4.2, 1.3])
-            with q_col:
-                q_val = st.text_input(
-                    "Search songs, remixes, covers, live versions, or YouTube URL",
-                    placeholder="Search a song or version...",
-                    label_visibility="collapsed",
-                )
-            with b_col:
-                go_search = st.form_submit_button("Search", type="primary", width="stretch")
-
-        if go_search and q_val.strip():
-            st.session_state.search_results = search_tracks(q_val.strip(), limit=12)
-
-        results = st.session_state.search_results
-        if results:
-            st.markdown(f"**Search Results ({len(results)})**")
-            for r_idx, r_item in enumerate(results):
-                r1, r2, r3, r4 = st.columns([0.9, 3.4, 1.1, 1.1])
-                with r1:
-                    if r_item.get("thumbnail"):
-                        st.image(r_item["thumbnail"], width="stretch")
-                with r2:
-                    st.markdown(f"**{r_idx + 1}. {r_item['title']}**")
-                    st.caption(f"{r_item['uploader']} • {format_duration(r_item.get('duration'))}")
-                with r3:
-                    if st.button("Play", key=f"below_res_play_{r_idx}", type="primary", width="stretch"):
-                        open_and_play_song(r_item)
-                        st.rerun()
-                with r4:
-                    fav_state = is_favorite(r_item)
-                    if st.button("♥ Fav" if fav_state else "♡ Fav", key=f"below_res_fav_{r_idx}", width="stretch"):
-                        toggle_favorite(r_item)
-                        st.rerun()
-                st.divider()
-        elif go_search:
-            st.warning("No matching songs found.")
-
-
-# --- TOP NAVIGATION BAR (HOME + SEARCH) ---
-nav_home, nav_search, nav_spacer = st.columns([1.2, 1.2, 6.6])
-with nav_home:
-    if st.button(
-        "Home",
-        key="top_nav_home",
-        type="primary" if st.session_state.active_view == "home" and not st.query_params.get("song") else "secondary",
-        width="stretch",
-    ):
-        st.session_state.active_view = "home"
-        st.query_params.clear()
-        st.rerun()
-with nav_search:
-    if st.button(
-        "Search",
-        key="top_nav_search",
-        type="primary" if st.session_state.active_view == "search" and not st.query_params.get("song") else "secondary",
-        width="stretch",
-    ):
-        st.session_state.active_view = "search"
-        st.query_params.clear()
-        st.rerun()
-
-selected_song_id = st.query_params.get("song", "")
-
-# --- CENTERED SONG PLAYER VIEW ---
-if selected_song_id:
-    track = next((t for t in st.session_state.playlist if str(t["id"]) == str(selected_song_id)), None)
-    if not track:
-        track = next((t for t in st.session_state.search_results if str(t["id"]) == str(selected_song_id)), None)
-    if not track:
-        track = next((t for t in st.session_state.favorites if str(t["id"]) == str(selected_song_id)), None)
-    if not track:
-        track = next((t for t in st.session_state.history if str(t["id"]) == str(selected_song_id)), None)
-    if not track:
-        track = fetch_by_id(str(selected_song_id))
-
-    if track:
-        track = ensure_playable_url(track)
-        idx = add_to_playlist(track)
-        st.session_state.playlist[idx] = track
-        st.session_state.current_idx = idx
-        record_history(track)
-        st.query_params["title"] = quote(track["title"])
-
-        _, center_col, _ = st.columns([1, 2.2, 1])
-        with center_col:
-            st.markdown(f"<h2 class='center-title'>{track['title']}</h2>", unsafe_allow_html=True)
-            st.markdown(f"<div class='center-artist'>{track['uploader']}</div>", unsafe_allow_html=True)
-
-            if track.get("thumbnail"):
-                st.image(track["thumbnail"], width="stretch")
-
-            duration_sec = int(track.get("duration") or 0)
-            current_pos = min(st.session_state.seek_sec, duration_sec) if duration_sec > 0 else 0
-
+def render_track_grid(tracks: List[Dict[str, Any]], key_prefix: str) -> None:
+    cols = st.columns(3)
+    for idx, track in enumerate(tracks):
+        col = cols[idx % 3]
+        with col:
+            st.markdown('<div class="song-card">', unsafe_allow_html=True)
+            st.image(track["thumbnail"], use_container_width=True)
             st.markdown(
-                f"<div class='center-timer'>{format_duration(current_pos)} / {format_duration(duration_sec)}</div>",
+                f'<div class="song-title" title="{track["title"]}">{track["title"]}</div>',
                 unsafe_allow_html=True,
             )
-
-            c_prev, c_pp, c_next = st.columns([1.2, 1.8, 1.2])
-            with c_prev:
-                if st.button("⏮ Back", key="mid_prev_btn", width="stretch"):
-                    play_previous_repeat(track)
+            st.markdown(
+                f'<div class="song-artist" title="{track["artist"]}">{track["artist"]} · {format_duration(track["duration"])}</div>',
+                unsafe_allow_html=True,
+            )
+            c1, c2 = st.columns([2, 1])
+            with c1:
+                if st.button("Play", key=f"{key_prefix}_play_{idx}_{track['id']}", use_container_width=True):
+                    open_song_page(track, autoplay=True)
+            with c2:
+                fav_label = "♥" if is_favorite(track["id"]) else "♡"
+                if st.button(fav_label, key=f"{key_prefix}_fav_{idx}_{track['id']}", use_container_width=True):
+                    toggle_favorite(track)
                     st.rerun()
-            with c_pp:
-                pp_label = "⏸ Pause" if st.session_state.is_playing else "▶ Play"
-                if st.button(pp_label, key="mid_pp_btn", type="primary", width="stretch"):
-                    st.session_state.is_playing = not st.session_state.is_playing
-                    st.rerun()
-            with c_next:
-                if st.button("Next ⏭", key="mid_next_btn", width="stretch"):
-                    play_next_from_favorites(track)
-                    st.rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
 
-            if duration_sec > 1:
-                slide_pos = st.slider(
-                    "Skip song position",
-                    min_value=0,
-                    max_value=duration_sec,
-                    value=current_pos,
-                    step=1,
-                    label_visibility="collapsed",
-                    key="song_skip_slider",
-                )
-                if slide_pos != st.session_state.seek_sec:
-                    st.session_state.seek_sec = slide_pos
-                    st.rerun()
-            else:
-                slide_pos = 0
 
-            if track.get("url"):
-                st.audio(track["url"], start_time=slide_pos, autoplay=st.session_state.is_playing)
-            else:
-                st.error("Could not load audio stream.")
-
-            fav_active = is_favorite(track)
-            fav_label = "♥ Favourited" if fav_active else "♡ Favourite"
-            if st.button(fav_label, key="mid_fav_btn", type="primary" if fav_active else "secondary", width="stretch"):
-                toggle_favorite(track)
-                st.rerun()
-
-        render_favourites_and_search_below()
-    else:
-        st.error("Could not load that song.")
-
-# --- HOME VIEW: PREVIOUSLY PLAYED COVER PHOTOS ONLY + BELOW LISTS ---
-elif st.session_state.active_view == "home":
-    st.markdown(
-        """
-        <div class="spotify-banner">
-            <span class="spotify-pill">HOME</span>
-            <h1 style="margin: 4px 0 4px 0;">Recently Played</h1>
-            <div class="muted-text">Click Play under any cover photo to start listening.</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    h_left, h_right = st.columns([6, 1.5])
-    with h_right:
-        if st.session_state.history and st.button("Clear History", key="clear_hist_btn", width="stretch"):
-            clear_history()
+def render_sidebar() -> None:
+    with st.sidebar:
+        st.title("🎧 Spotify Streamer")
+        nav_options = ["Home", "Search", "Song Page"]
+        current_index = nav_options.index(st.session_state.page)
+        selected = st.radio("Navigation", nav_options, index=current_index)
+        if selected != st.session_state.page:
+            st.session_state.page = selected
             st.rerun()
 
-    history_items = st.session_state.history
-    if history_items:
-        cols_per_row = 4
-        for row_start in range(0, len(history_items), cols_per_row):
-            row_items = history_items[row_start : row_start + cols_per_row]
-            grid_cols = st.columns(cols_per_row, gap="medium")
-            for col_idx, item in enumerate(row_items):
-                with grid_cols[col_idx]:
-                    if item.get("thumbnail"):
-                        st.image(item["thumbnail"], width="stretch")
-                    if st.button("Play", key=f"hist_play_{row_start + col_idx}", type="primary", width="stretch"):
-                        open_and_play_song(item)
-                        st.rerun()
-    else:
-        st.info("No songs played yet. Use Search below or at the top to find a song.")
+        st.divider()
+        st.subheader("♥ Favourites")
+        if not st.session_state.favorites:
+            st.caption("No saved favorites yet.")
+        else:
+            for idx, fav in enumerate(st.session_state.favorites[:12]):
+                col_title, col_play = st.columns([4, 1])
+                with col_title:
+                    st.caption(f"**{fav['title']}**\n{fav['artist']}")
+                with col_play:
+                    if st.button("▶", key=f"side_fav_{idx}_{fav['id']}"):
+                        open_song_page(fav, autoplay=True)
 
-    render_favourites_and_search_below()
+        if st.session_state.current_track:
+            st.divider()
+            st.caption("Now Selected")
+            st.markdown(f"**{st.session_state.current_track['title']}**")
+            st.caption(st.session_state.current_track["artist"])
 
-# --- SEARCH VIEW ---
-else:
-    st.markdown(
-        """
-        <div class="spotify-banner">
-            <span class="spotify-pill">SEARCH</span>
-            <h1 style="margin: 4px 0 4px 0;">Find Songs & Versions</h1>
-            <div class="muted-text">Pick from 12 versions, save favourites, or jump to any track.</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
 
-    with st.form("spotify_search_form", clear_on_submit=False):
-        q_input, q_btn = st.columns([4.5, 1.3])
-        with q_input:
+def render_home_page() -> None:
+    st.header("Home — Recent History")
+    if not st.session_state.history:
+        st.info("Your listening history is empty. Go to **Search** to find and play a song.")
+        if st.button("Go to Search"):
+            st.session_state.page = "Search"
+            st.rerun()
+        return
+    render_track_grid(st.session_state.history, key_prefix="home")
+
+
+def render_search_page() -> None:
+    st.header("Search")
+    with st.form("search_form", clear_on_submit=False):
+        col_input, col_btn = st.columns([5, 1])
+        with col_input:
             query = st.text_input(
-                "Search songs, remixes, live versions, covers, or YouTube URL",
-                placeholder="Search a song or version...",
+                "Search songs or artists",
+                value=st.session_state.last_query,
+                placeholder="Search for a song, artist, or album...",
                 label_visibility="collapsed",
             )
-        with q_btn:
-            submitted = st.form_submit_button("Search", type="primary", width="stretch")
+        with col_btn:
+            submitted = st.form_submit_button("Search", use_container_width=True)
 
     if submitted and query.strip():
-        st.session_state.search_results = search_tracks(query.strip(), limit=12)
+        st.session_state.last_query = query.strip()
+        with st.spinner("Searching tracks..."):
+            try:
+                st.session_state.search_results = search_tracks(query.strip(), limit=SEARCH_LIMIT)
+            except Exception as exc:
+                st.error(f"Search failed: {exc}")
+                st.session_state.search_results = []
 
-    results = st.session_state.search_results
-    if results:
-        st.markdown(f"**Top {len(results)} Results**")
-        for idx, item in enumerate(results):
-            c_img, c_meta, c_act1, c_act2 = st.columns([0.9, 3.5, 1.1, 1.1])
-            with c_img:
-                if item.get("thumbnail"):
-                    st.image(item["thumbnail"], width="stretch")
-            with c_meta:
-                st.markdown(f"**{idx + 1}. {item['title']}**")
-                st.caption(f"{item['uploader']} • {format_duration(item.get('duration'))}")
-            with c_act1:
-                if st.button("Play", key=f"sp_open_{idx}", type="primary", width="stretch"):
-                    open_and_play_song(item)
-                    st.rerun()
-            with c_act2:
-                fav_now = is_favorite(item)
-                if st.button("♥ Fav" if fav_now else "♡ Fav", key=f"sp_fav_{idx}", width="stretch"):
-                    toggle_favorite(item)
-                    st.rerun()
-            st.divider()
-    elif submitted:
-        st.warning("No matching songs found.")
+    if st.session_state.search_results:
+        st.caption(f"Showing up to {SEARCH_LIMIT} results for \"{st.session_state.last_query}\"")
+        render_track_grid(st.session_state.search_results, key_prefix="search")
+    elif st.session_state.last_query:
+        st.warning("No matching tracks found. Try another search term.")
 
-    render_favourites_and_search_below()
+
+def render_song_page() -> None:
+    track = st.session_state.current_track
+    if not track:
+        st.info("No track selected yet. Search for a song or pick one from History.")
+        return
+
+    st.header("Now Playing")
+    st.markdown('<div class="now-playing-box">', unsafe_allow_html=True)
+    _, img_col, _ = st.columns([1, 2, 1])
+    with img_col:
+        st.image(track["thumbnail"], use_container_width=True)
+
+    st.markdown(f"### {track['title']}")
+    st.markdown(f'<div class="muted-caption">{track["artist"]}</div>', unsafe_allow_html=True)
+
+    total_seconds = int(track.get("duration") or 0)
+    max_seek = max(total_seconds, 1)
+    current_seek = min(int(st.session_state.seek_position), max_seek)
+
+    seek_val = st.slider(
+        "Seek position",
+        min_value=0,
+        max_value=max_seek,
+        value=current_seek,
+        label_visibility="collapsed",
+        key=f"seek_slider_{track['id']}",
+    )
+    st.session_state.seek_position = seek_val
+
+    t_left, t_right = st.columns(2)
+    with t_left:
+        st.caption(format_duration(seek_val))
+    with t_right:
+        st.caption(format_duration(total_seconds))
+
+    c_prev, c_play, c_next, c_fav = st.columns(4)
+    with c_prev:
+        if st.button("⏮ Prev", use_container_width=True):
+            step_track(-1)
+    with c_play:
+        play_label = "⏸ Pause" if st.session_state.is_playing else "▶ Play"
+        if st.button(play_label, use_container_width=True):
+            st.session_state.is_playing = not st.session_state.is_playing
+            st.rerun()
+    with c_next:
+        if st.button("⏭ Next", use_container_width=True):
+            step_track(1)
+    with c_fav:
+        fav_text = "♥ Saved" if is_favorite(track["id"]) else "♡ Favorite"
+        if st.button(fav_text, use_container_width=True):
+            toggle_favorite(track)
+            st.rerun()
+
+    if st.session_state.is_playing:
+        with st.spinner("Loading audio stream..."):
+            try:
+                stream_url = resolve_stream_url(track["webpage_url"])
+            except Exception as exc:
+                stream_url = None
+                st.error(f"Could not extract audio stream: {exc}")
+
+        if stream_url:
+            st.audio(stream_url, format="audio/mp4", start_time=int(seek_val))
+        else:
+            st.warning("Direct audio stream unavailable for this track.")
+    else:
+        st.caption("Playback paused. Click **▶ Play** to stream audio.")
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def main() -> None:
+    init_state()
+    render_sidebar()
+
+    if st.session_state.page == "Home":
+        render_home_page()
+    elif st.session_state.page == "Search":
+        render_search_page()
+    elif st.session_state.page == "Song Page":
+        render_song_page()
+
+
+if __name__ == "__main__":
+    main()
