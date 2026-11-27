@@ -1,23 +1,16 @@
 import json
-import os
-import subprocess
-import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-try:
-    import yt_dlp
-except ModuleNotFoundError:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "yt-dlp"])
-    import yt_dlp
-
 import streamlit as st
+import yt_dlp
 
 BASE_DIR = Path(__file__).resolve().parent
 FAVORITES_FILE = BASE_DIR / "favorites.json"
 HISTORY_FILE = BASE_DIR / "history.json"
 MAX_HISTORY_ITEMS = 24
 SEARCH_LIMIT = 12
+FALLBACK_THUMBNAIL = "https://via.placeholder.com/600x600/181818/1DB954?text=No+Cover+Art"
 
 st.set_page_config(
     page_title="Spotify Streamer",
@@ -90,25 +83,6 @@ SPOTIFY_CSS = """
 st.markdown(SPOTIFY_CSS, unsafe_allow_html=True)
 
 
-def load_json_list(file_path: Path) -> List[Dict[str, Any]]:
-    if not file_path.exists():
-        return []
-    try:
-        with file_path.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, list) else []
-    except (json.JSONDecodeError, OSError):
-        return []
-
-
-def save_json_list(file_path: Path, items: List[Dict[str, Any]]) -> None:
-    try:
-        with file_path.open("w", encoding="utf-8") as f:
-            json.dump(items, f, indent=2, ensure_ascii=False)
-    except OSError as exc:
-        st.warning(f"Could not save {file_path.name}: {exc}")
-
-
 def format_duration(seconds: Optional[float]) -> str:
     if not seconds or seconds <= 0:
         return "0:00"
@@ -128,34 +102,64 @@ def pick_thumbnail(entry: Dict[str, Any]) -> str:
         for item in reversed(thumbs):
             if isinstance(item, dict) and item.get("url"):
                 return str(item["url"])
-    return "https://via.placeholder.com/600x600/181818/1DB954?text=No+Cover+Art"
+    return FALLBACK_THUMBNAIL
 
 
-def normalize_entry(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def normalize_track(entry: Any, fallback_index: int = 0) -> Optional[Dict[str, Any]]:
     if not isinstance(entry, dict):
         return None
     video_id = entry.get("id") or entry.get("webpage_url_basename")
     url = entry.get("webpage_url") or entry.get("url")
     if not url and video_id:
         url = f"https://www.youtube.com/watch?v={video_id}"
-    if not url:
-        return None
-    title = entry.get("title") or "Untitled Track"
-    artist = (
+    track_id = str(video_id or url or f"track_{fallback_index}")
+    title = str(entry.get("title") or entry.get("name") or "Untitled Track")
+    artist = str(
         entry.get("artist")
         or entry.get("uploader")
         or entry.get("channel")
         or "Unknown Artist"
     )
-    duration = entry.get("duration") or 0
+    raw_duration = entry.get("duration")
+    try:
+        duration = float(raw_duration) if raw_duration else 0.0
+    except (TypeError, ValueError):
+        duration = 0.0
+    thumbnail = str(entry.get("thumbnail") or pick_thumbnail(entry))
     return {
-        "id": str(video_id or url),
-        "title": str(title),
-        "artist": str(artist),
-        "duration": float(duration) if duration else 0.0,
-        "thumbnail": pick_thumbnail(entry),
-        "webpage_url": str(url),
+        "id": track_id,
+        "title": title,
+        "artist": artist,
+        "duration": duration,
+        "thumbnail": thumbnail,
+        "webpage_url": str(url or ""),
     }
+
+
+def load_json_list(file_path: Path) -> List[Dict[str, Any]]:
+    if not file_path.exists():
+        return []
+    try:
+        with file_path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, list):
+            return []
+        normalized: List[Dict[str, Any]] = []
+        for idx, item in enumerate(data):
+            clean = normalize_track(item, fallback_index=idx)
+            if clean:
+                normalized.append(clean)
+        return normalized
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def save_json_list(file_path: Path, items: List[Dict[str, Any]]) -> None:
+    try:
+        with file_path.open("w", encoding="utf-8") as f:
+            json.dump(items, f, indent=2, ensure_ascii=False)
+    except OSError as exc:
+        st.warning(f"Could not save {file_path.name}: {exc}")
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -174,15 +178,17 @@ def search_tracks(query: str, limit: int = SEARCH_LIMIT) -> List[Dict[str, Any]]
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(search_target, download=False)
     entries = info.get("entries") if isinstance(info, dict) else []
-    for raw in entries or []:
-        track = normalize_entry(raw)
-        if track:
+    for idx, raw in enumerate(entries or []):
+        track = normalize_track(raw, fallback_index=idx)
+        if track and track.get("webpage_url"):
             tracks.append(track)
     return tracks[:limit]
 
 
 @st.cache_data(ttl=600, show_spinner=False)
 def resolve_stream_url(webpage_url: str) -> Optional[str]:
+    if not webpage_url:
+        return None
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
@@ -230,52 +236,65 @@ def is_favorite(track_id: str) -> bool:
 
 
 def toggle_favorite(track: Dict[str, Any]) -> None:
-    track_id = track.get("id")
-    if not track_id:
+    safe_track = normalize_track(track)
+    if not safe_track:
         return
+    track_id = safe_track["id"]
     if is_favorite(track_id):
         st.session_state.favorites = [
             item for item in st.session_state.favorites if item.get("id") != track_id
         ]
     else:
-        st.session_state.favorites = [track] + [
+        st.session_state.favorites = [safe_track] + [
             item for item in st.session_state.favorites if item.get("id") != track_id
         ]
     save_json_list(FAVORITES_FILE, st.session_state.favorites)
 
 
 def record_history(track: Dict[str, Any]) -> None:
-    track_id = track.get("id")
+    safe_track = normalize_track(track)
+    if not safe_track:
+        return
+    track_id = safe_track["id"]
     filtered = [item for item in st.session_state.history if item.get("id") != track_id]
-    updated = [track] + filtered
+    updated = [safe_track] + filtered
     st.session_state.history = updated[:MAX_HISTORY_ITEMS]
     save_json_list(HISTORY_FILE, st.session_state.history)
 
 
 def build_queue(track: Dict[str, Any]) -> List[Dict[str, Any]]:
     candidates: List[Dict[str, Any]] = []
-    for pool in (st.session_state.search_results, st.session_state.history, st.session_state.favorites):
+    for pool in (
+        st.session_state.search_results,
+        st.session_state.history,
+        st.session_state.favorites,
+    ):
         for item in pool:
-            if item.get("id") and all(existing.get("id") != item.get("id") for existing in candidates):
-                candidates.append(item)
-    if all(existing.get("id") != track.get("id") for existing in candidates):
-        candidates.insert(0, track)
+            clean = normalize_track(item)
+            if clean and all(existing.get("id") != clean["id"] for existing in candidates):
+                candidates.append(clean)
+    clean_current = normalize_track(track)
+    if clean_current and all(existing.get("id") != clean_current["id"] for existing in candidates):
+        candidates.insert(0, clean_current)
     return candidates
 
 
 def open_song_page(track: Dict[str, Any], autoplay: bool = True) -> None:
-    st.session_state.current_track = track
-    st.session_state.queue = build_queue(track)
+    clean = normalize_track(track)
+    if not clean:
+        return
+    st.session_state.current_track = clean
+    st.session_state.queue = build_queue(clean)
     st.session_state.seek_position = 0
     st.session_state.is_playing = autoplay
     st.session_state.page = "Song Page"
-    record_history(track)
+    record_history(clean)
     st.rerun()
 
 
 def step_track(delta: int) -> None:
-    current = st.session_state.current_track
-    queue = st.session_state.queue or build_queue(current) if current else []
+    current = normalize_track(st.session_state.current_track)
+    queue = st.session_state.queue or (build_queue(current) if current else [])
     if not queue or not current:
         return
     ids = [item.get("id") for item in queue]
@@ -289,26 +308,33 @@ def step_track(delta: int) -> None:
 
 def render_track_grid(tracks: List[Dict[str, Any]], key_prefix: str) -> None:
     cols = st.columns(3)
-    for idx, track in enumerate(tracks):
+    for idx, raw_track in enumerate(tracks):
+        track = normalize_track(raw_track, fallback_index=idx)
+        if not track:
+            continue
         col = cols[idx % 3]
         with col:
             st.markdown('<div class="song-card">', unsafe_allow_html=True)
-            st.image(track["thumbnail"], use_container_width=True)
+            st.image(track.get("thumbnail", FALLBACK_THUMBNAIL), use_container_width=True)
+            title = track.get("title", "Untitled Track")
+            artist = track.get("artist", "Unknown Artist")
+            duration_str = format_duration(track.get("duration"))
+            track_id = track.get("id", str(idx))
             st.markdown(
-                f'<div class="song-title" title="{track["title"]}">{track["title"]}</div>',
+                f'<div class="song-title" title="{title}">{title}</div>',
                 unsafe_allow_html=True,
             )
             st.markdown(
-                f'<div class="song-artist" title="{track["artist"]}">{track["artist"]} · {format_duration(track["duration"])}</div>',
+                f'<div class="song-artist" title="{artist}">{artist} · {duration_str}</div>',
                 unsafe_allow_html=True,
             )
             c1, c2 = st.columns([2, 1])
             with c1:
-                if st.button("Play", key=f"{key_prefix}_play_{idx}_{track['id']}", use_container_width=True):
+                if st.button("Play", key=f"{key_prefix}_play_{idx}_{track_id}", use_container_width=True):
                     open_song_page(track, autoplay=True)
             with c2:
-                fav_label = "♥" if is_favorite(track["id"]) else "♡"
-                if st.button(fav_label, key=f"{key_prefix}_fav_{idx}_{track['id']}", use_container_width=True):
+                fav_label = "♥" if is_favorite(track_id) else "♡"
+                if st.button(fav_label, key=f"{key_prefix}_fav_{idx}_{track_id}", use_container_width=True):
                     toggle_favorite(track)
                     st.rerun()
             st.markdown("</div>", unsafe_allow_html=True)
@@ -329,19 +355,26 @@ def render_sidebar() -> None:
         if not st.session_state.favorites:
             st.caption("No saved favorites yet.")
         else:
-            for idx, fav in enumerate(st.session_state.favorites[:12]):
+            for idx, raw_fav in enumerate(st.session_state.favorites[:12]):
+                fav = normalize_track(raw_fav, fallback_index=idx)
+                if not fav:
+                    continue
+                fav_title = fav.get("title", "Untitled Track")
+                fav_artist = fav.get("artist", "Unknown Artist")
+                fav_id = fav.get("id", str(idx))
                 col_title, col_play = st.columns([4, 1])
                 with col_title:
-                    st.caption(f"**{fav['title']}**\n{fav['artist']}")
+                    st.caption(f"**{fav_title}**\n{fav_artist}")
                 with col_play:
-                    if st.button("▶", key=f"side_fav_{idx}_{fav['id']}"):
+                    if st.button("▶", key=f"side_fav_{idx}_{fav_id}"):
                         open_song_page(fav, autoplay=True)
 
-        if st.session_state.current_track:
+        current = normalize_track(st.session_state.current_track)
+        if current:
             st.divider()
             st.caption("Now Selected")
-            st.markdown(f"**{st.session_state.current_track['title']}**")
-            st.caption(st.session_state.current_track["artist"])
+            st.markdown(f"**{current.get('title', 'Untitled Track')}**")
+            st.caption(current.get("artist", "Unknown Artist"))
 
 
 def render_home_page() -> None:
@@ -379,26 +412,32 @@ def render_search_page() -> None:
                 st.session_state.search_results = []
 
     if st.session_state.search_results:
-        st.caption(f"Showing up to {SEARCH_LIMIT} results for \"{st.session_state.last_query}\"")
+        st.caption(f'Showing up to {SEARCH_LIMIT} results for "{st.session_state.last_query}"')
         render_track_grid(st.session_state.search_results, key_prefix="search")
     elif st.session_state.last_query:
         st.warning("No matching tracks found. Try another search term.")
 
 
 def render_song_page() -> None:
-    track = st.session_state.current_track
+    track = normalize_track(st.session_state.current_track)
     if not track:
         st.info("No track selected yet. Search for a song or pick one from History.")
         return
+
+    title = track.get("title", "Untitled Track")
+    artist = track.get("artist", "Unknown Artist")
+    track_id = track.get("id", "current")
+    thumbnail = track.get("thumbnail", FALLBACK_THUMBNAIL)
+    webpage_url = track.get("webpage_url", "")
 
     st.header("Now Playing")
     st.markdown('<div class="now-playing-box">', unsafe_allow_html=True)
     _, img_col, _ = st.columns([1, 2, 1])
     with img_col:
-        st.image(track["thumbnail"], use_container_width=True)
+        st.image(thumbnail, use_container_width=True)
 
-    st.markdown(f"### {track['title']}")
-    st.markdown(f'<div class="muted-caption">{track["artist"]}</div>', unsafe_allow_html=True)
+    st.markdown(f"### {title}")
+    st.markdown(f'<div class="muted-caption">{artist}</div>', unsafe_allow_html=True)
 
     total_seconds = int(track.get("duration") or 0)
     max_seek = max(total_seconds, 1)
@@ -410,7 +449,7 @@ def render_song_page() -> None:
         max_value=max_seek,
         value=current_seek,
         label_visibility="collapsed",
-        key=f"seek_slider_{track['id']}",
+        key=f"seek_slider_{track_id}",
     )
     st.session_state.seek_position = seek_val
 
@@ -433,7 +472,7 @@ def render_song_page() -> None:
         if st.button("⏭ Next", use_container_width=True):
             step_track(1)
     with c_fav:
-        fav_text = "♥ Saved" if is_favorite(track["id"]) else "♡ Favorite"
+        fav_text = "♥ Saved" if is_favorite(track_id) else "♡ Favorite"
         if st.button(fav_text, use_container_width=True):
             toggle_favorite(track)
             st.rerun()
@@ -441,7 +480,7 @@ def render_song_page() -> None:
     if st.session_state.is_playing:
         with st.spinner("Loading audio stream..."):
             try:
-                stream_url = resolve_stream_url(track["webpage_url"])
+                stream_url = resolve_stream_url(webpage_url)
             except Exception as exc:
                 stream_url = None
                 st.error(f"Could not extract audio stream: {exc}")
