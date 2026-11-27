@@ -11,7 +11,7 @@ FAVORITES_FILE = BASE_DIR / "favorites.json"
 HISTORY_FILE = BASE_DIR / "history.json"
 MAX_HISTORY_ITEMS = 24
 SEARCH_LIMIT = 12
-RECOMMENDATION_LIMIT = 6
+RECOMMENDATION_LIMIT = 30
 FALLBACK_THUMBNAIL = "https://via.placeholder.com/600x600/121212/1DB954?text=No+Cover+Art"
 
 st.set_page_config(
@@ -56,13 +56,6 @@ SPOTIFY_CSS = """
     input[type="text"]::placeholder {
         color: #a1a1aa !important;
     }
-    [data-testid="stSlider"] [role="slider"] {
-        background-color: #ffffff !important;
-        border-color: #ffffff !important;
-    }
-    [data-testid="stSlider"] [data-testid="stThumbValue"] {
-        color: #ffffff !important;
-    }
     .song-card {
         background-color: #111111;
         border: 1px solid #27272a;
@@ -72,7 +65,7 @@ SPOTIFY_CSS = """
     }
     .song-title {
         font-weight: 700;
-        font-size: 0.98rem;
+        font-size: 0.96rem;
         color: #ffffff !important;
         margin-top: 8px;
         white-space: nowrap;
@@ -80,7 +73,7 @@ SPOTIFY_CSS = """
         text-overflow: ellipsis;
     }
     .song-artist {
-        font-size: 0.85rem;
+        font-size: 0.84rem;
         color: #d4d4d8 !important;
         white-space: nowrap;
         overflow: hidden;
@@ -91,9 +84,9 @@ SPOTIFY_CSS = """
         background-color: #111111;
         border: 1px solid #27272a;
         border-radius: 16px;
-        padding: 24px;
-        max-width: 560px;
-        margin: 0 auto 20px auto;
+        padding: 22px;
+        max-width: 580px;
+        margin: 0 auto 24px auto;
         text-align: center;
     }
     div.stButton > button, div.stFormSubmitButton > button {
@@ -102,6 +95,9 @@ SPOTIFY_CSS = """
         border: none !important;
         border-radius: 999px !important;
         font-weight: 700 !important;
+        padding: 0.3rem 0.75rem !important;
+        font-size: 0.84rem !important;
+        min-height: 2.1rem !important;
     }
     div.stButton > button:hover, div.stFormSubmitButton > button:hover {
         background-color: #1ed760 !important;
@@ -219,17 +215,18 @@ def get_similar_tracks(
     track_id: str,
     title: str,
     artist: str,
+    last_query: str = "",
     limit: int = RECOMMENDATION_LIMIT,
 ) -> List[Dict[str, Any]]:
     similar: List[Dict[str, Any]] = []
-    seen_ids = {track_id}
+    seen_ids = {track_id} if track_id else set()
 
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
         "extract_flat": "in_playlist",
         "skip_download": True,
-        "playlistend": limit + 4,
+        "playlistend": limit + 10,
     }
 
     if track_id and not track_id.startswith("http") and not track_id.startswith("track_"):
@@ -248,13 +245,25 @@ def get_similar_tracks(
         except Exception:
             pass
 
-    fallback_query = f"{artist} {title} mix similar songs".strip()
-    for item in search_tracks(fallback_query, limit=limit + 4):
-        if item["id"] not in seen_ids and item.get("webpage_url"):
-            seen_ids.add(item["id"])
-            similar.append(item)
-            if len(similar) >= limit:
-                break
+    queries: List[str] = []
+    if last_query.strip():
+        queries.append(f"{last_query.strip()} songs")
+    if artist and artist != "Unknown Artist":
+        queries.append(f"{artist} top songs")
+        queries.append(f"songs like {artist}")
+    if title and title != "Untitled Track":
+        queries.append(f"{title} similar songs")
+        queries.append(f"{artist} {title} mix".strip())
+
+    for q in queries:
+        if len(similar) >= limit:
+            break
+        for item in search_tracks(q, limit=14):
+            if item["id"] not in seen_ids and item.get("webpage_url"):
+                seen_ids.add(item["id"])
+                similar.append(item)
+                if len(similar) >= limit:
+                    break
 
     return similar[:limit]
 
@@ -338,16 +347,6 @@ def record_history(track: Dict[str, Any]) -> None:
     save_json_list(HISTORY_FILE, st.session_state.history)
 
 
-def refresh_recommendations(track: Dict[str, Any]) -> None:
-    similar = get_similar_tracks(
-        track_id=track.get("id", ""),
-        title=track.get("title", ""),
-        artist=track.get("artist", ""),
-        limit=RECOMMENDATION_LIMIT,
-    )
-    st.session_state.recommendations = similar
-
-
 def build_queue(track: Dict[str, Any]) -> List[Dict[str, Any]]:
     candidates: List[Dict[str, Any]] = []
     for pool in (
@@ -375,8 +374,32 @@ def open_song_page(track: Dict[str, Any], autoplay: bool = True) -> None:
     st.session_state.show_favorites = False
     st.session_state.page = "Song Page"
     record_history(clean)
-    refresh_recommendations(clean)
+    st.session_state.recommendations = get_similar_tracks(
+        track_id=clean.get("id", ""),
+        title=clean.get("title", ""),
+        artist=clean.get("artist", ""),
+        last_query=st.session_state.last_query,
+        limit=RECOMMENDATION_LIMIT,
+    )
     st.session_state.queue = build_queue(clean)
+    st.rerun()
+
+
+def toggle_track_play_pause(track: Dict[str, Any]) -> None:
+    clean = normalize_track(track)
+    if not clean:
+        return
+    current = normalize_track(st.session_state.current_track)
+    is_same_track = bool(current and current.get("id") == clean.get("id"))
+    if is_same_track:
+        st.session_state.is_playing = not st.session_state.is_playing
+        st.rerun()
+    else:
+        open_song_page(clean, autoplay=True)
+
+
+def stop_playback() -> None:
+    st.session_state.is_playing = False
     st.rerun()
 
 
@@ -400,40 +423,40 @@ def handle_query_auto_next() -> None:
         step_track(1, autoplay=True)
 
 
-def render_auto_advance_listener(track_id: str, is_playing: bool) -> None:
+def render_auto_advance_listener(is_playing: bool) -> None:
     if not is_playing:
         return
     components.html(
-        f"""
+        """
         <script>
-        (function() {{
+        (function() {
             const parentDoc = window.parent.document;
             let triggered = false;
-            const timer = setInterval(() => {{
+            const timer = setInterval(() => {
                 const audios = parentDoc.querySelectorAll('audio');
-                for (const audio of audios) {{
-                    if (!audio.dataset.autoNextBound) {{
+                for (const audio of audios) {
+                    if (!audio.dataset.autoNextBound) {
                         audio.dataset.autoNextBound = '1';
-                        audio.addEventListener('ended', () => {{
+                        audio.addEventListener('ended', () => {
                             if (triggered) return;
                             triggered = true;
                             clearInterval(timer);
                             const nextBtn = Array.from(parentDoc.querySelectorAll('button')).find(
                                 (btn) => btn.innerText && btn.innerText.includes('Next')
                             );
-                            if (nextBtn) {{
+                            if (nextBtn) {
                                 nextBtn.click();
-                            }} else {{
+                            } else {
                                 const url = new URL(window.parent.location.href);
                                 url.searchParams.set('auto_next', '1');
                                 window.parent.location.href = url.toString();
-                            }}
-                        }});
-                    }}
-                }}
-            }}, 500);
+                            }
+                        });
+                    }
+                }
+            }, 500);
             setTimeout(() => clearInterval(timer), 3600000);
-        }})();
+        })();
         </script>
         """,
         height=0,
@@ -441,6 +464,9 @@ def render_auto_advance_listener(track_id: str, is_playing: bool) -> None:
 
 
 def render_track_grid(tracks: List[Dict[str, Any]], key_prefix: str) -> None:
+    current = normalize_track(st.session_state.current_track)
+    current_id = current.get("id") if current else None
+
     cols = st.columns(3)
     for idx, raw_track in enumerate(tracks):
         track = normalize_track(raw_track, fallback_index=idx)
@@ -450,21 +476,37 @@ def render_track_grid(tracks: List[Dict[str, Any]], key_prefix: str) -> None:
         with col:
             st.markdown('<div class="song-card">', unsafe_allow_html=True)
             st.image(track.get("thumbnail", FALLBACK_THUMBNAIL), use_container_width=True)
+
             title = track.get("title", "Untitled Track")
             artist = track.get("artist", "Unknown Artist")
             duration_str = format_duration(track.get("duration"))
             track_id = track.get("id", str(idx))
-            st.markdown(
-                f'<div class="song-title" title="{title}">{title}</div>',
-                unsafe_allow_html=True,
-            )
+            track_playing_now = bool(current_id == track_id and st.session_state.is_playing)
+            pp_icon = "⏸" if track_playing_now else "▶"
+
+            title_col, pp_col = st.columns([5, 1.3])
+            with title_col:
+                st.markdown(
+                    f'<div class="song-title" title="{title}">{title}</div>',
+                    unsafe_allow_html=True,
+                )
+            with pp_col:
+                if st.button(
+                    pp_icon,
+                    key=f"{key_prefix}_pp_{idx}_{track_id}",
+                    help="Play or Pause",
+                    use_container_width=True,
+                ):
+                    toggle_track_play_pause(track)
+
             st.markdown(
                 f'<div class="song-artist" title="{artist}">{artist} · {duration_str}</div>',
                 unsafe_allow_html=True,
             )
+
             c1, c2 = st.columns([2, 1])
             with c1:
-                if st.button("Play", key=f"{key_prefix}_play_{idx}_{track_id}", use_container_width=True):
+                if st.button("Open", key=f"{key_prefix}_open_{idx}_{track_id}", use_container_width=True):
                     open_song_page(track, autoplay=True)
             with c2:
                 fav_label = "♥" if is_favorite(track_id) else "♡"
@@ -532,20 +574,25 @@ def render_favorites_drawer_section() -> None:
 
 def render_recommendations_section(key_prefix: str) -> None:
     current = normalize_track(st.session_state.current_track)
+    history_seed = normalize_track(st.session_state.history[0]) if st.session_state.history else None
+    seed = current or history_seed
+
     recs = st.session_state.recommendations
-    if not recs and current:
-        recs = get_similar_tracks(
-            track_id=current.get("id", ""),
-            title=current.get("title", ""),
-            artist=current.get("artist", ""),
-            limit=RECOMMENDATION_LIMIT,
-        )
+    if not recs and seed:
+        with st.spinner("Loading similar song recommendations..."):
+            recs = get_similar_tracks(
+                track_id=seed.get("id", ""),
+                title=seed.get("title", ""),
+                artist=seed.get("artist", ""),
+                last_query=st.session_state.last_query,
+                limit=RECOMMENDATION_LIMIT,
+            )
         st.session_state.recommendations = recs
 
     if not recs:
         return
 
-    st.subheader("Recommended Similar Songs")
+    st.subheader(f"Recommended Similar Songs ({len(recs)})")
     render_track_grid(recs, key_prefix=key_prefix)
 
 
@@ -622,6 +669,7 @@ def render_song_page() -> None:
     thumbnail = track.get("thumbnail", FALLBACK_THUMBNAIL)
     webpage_url = track.get("webpage_url", "")
     duration_str = format_duration(track.get("duration"))
+    pp_icon = "⏸" if st.session_state.is_playing else "▶"
 
     st.header("Now Playing")
     st.markdown('<div class="now-playing-box">', unsafe_allow_html=True)
@@ -629,27 +677,16 @@ def render_song_page() -> None:
     with img_col:
         st.image(thumbnail, use_container_width=True)
 
-    st.markdown(f"### {title}")
+    t_col, b_col = st.columns([5, 1.2])
+    with t_col:
+        st.markdown(f"### {title}")
+    with b_col:
+        if st.button(pp_icon, key="now_playing_title_pp", help="Play or Pause", use_container_width=True):
+            toggle_track_play_pause(track)
+
     st.markdown(f'<div class="song-artist">{artist} · {duration_str}</div>', unsafe_allow_html=True)
 
-    c_prev, c_play, c_next, c_fav = st.columns(4)
-    with c_prev:
-        if st.button("⏮ Prev", use_container_width=True):
-            step_track(-1, autoplay=True)
-    with c_play:
-        play_label = "⏸ Pause" if st.session_state.is_playing else "▶ Play"
-        if st.button(play_label, use_container_width=True):
-            st.session_state.is_playing = not st.session_state.is_playing
-            st.rerun()
-    with c_next:
-        if st.button("⏭ Next", key="now_playing_next_btn", use_container_width=True):
-            step_track(1, autoplay=True)
-    with c_fav:
-        fav_text = "♥ Saved" if is_favorite(track_id) else "♡ Favorite"
-        if st.button(fav_text, use_container_width=True):
-            toggle_favorite(track)
-            st.rerun()
-
+    # Audio player bar on the upper side
     if st.session_state.is_playing:
         with st.spinner("Loading audio stream..."):
             try:
@@ -659,16 +696,29 @@ def render_song_page() -> None:
                 st.error(f"Could not extract audio stream: {exc}")
 
         if stream_url:
-            st.audio(
-                stream_url,
-                format="audio/mp4",
-                autoplay=True,
-            )
-            render_auto_advance_listener(track_id=track_id, is_playing=True)
+            st.audio(stream_url, format="audio/mp4", autoplay=True)
+            render_auto_advance_listener(is_playing=True)
         else:
             st.warning("Direct audio stream unavailable for this track.")
     else:
-        st.caption("Playback paused. Click **▶ Play** to stream audio.")
+        st.caption("Stopped / Paused. Click ▶ next to the title to play.")
+
+    # Smaller Prev, Next, Stop, and Favorite buttons below the audio bar
+    c_prev, c_next, c_stop, c_fav = st.columns(4)
+    with c_prev:
+        if st.button("⏮ Prev", key="now_playing_prev_btn", use_container_width=True):
+            step_track(-1, autoplay=True)
+    with c_next:
+        if st.button("⏭ Next", key="now_playing_next_btn", use_container_width=True):
+            step_track(1, autoplay=True)
+    with c_stop:
+        if st.button("⏹ Stop", key="now_playing_stop_btn", use_container_width=True):
+            stop_playback()
+    with c_fav:
+        fav_text = "♥ Saved" if is_favorite(track_id) else "♡ Fav"
+        if st.button(fav_text, key="now_playing_fav_btn", use_container_width=True):
+            toggle_favorite(track)
+            st.rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)
     render_recommendations_section(key_prefix="song_recs")
